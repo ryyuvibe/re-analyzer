@@ -16,10 +16,14 @@ class HUDClient:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or settings.hud_api_key
 
-    async def get_fmr(self, state_fips: str, county_fips: str) -> HUDFairMarketRent | None:
+    async def get_fmr(
+        self, state_fips: str, county_fips: str, zip_code: str = ""
+    ) -> HUDFairMarketRent | None:
         """Fetch Fair Market Rent for a county.
 
         Entity ID format: state_fips + county_fips + "99999" (county-level).
+        If zip_code is provided and the area uses Small Area FMR, returns
+        the zip-level rate; otherwise falls back to the MSA-level rate.
         """
         if not self.api_key:
             logger.debug("HUD API key not configured, skipping FMR lookup")
@@ -43,24 +47,40 @@ class HUDClient:
             logger.warning("HUD FMR request error: %s", e)
             return None
 
-        fmr_data = data.get("data", {})
-        if not fmr_data:
+        top = data.get("data", {})
+        if not top:
             return None
 
-        # Handle both list and dict responses
-        if isinstance(fmr_data, list):
-            fmr_data = fmr_data[0] if fmr_data else {}
+        area_name = top.get("area_name", top.get("areaname", ""))
+        year = top.get("year", 0)
+
+        # FMR values live inside basicdata (Small Area FMR areas) or directly on top
+        basicdata = top.get("basicdata")
+        if isinstance(basicdata, list) and basicdata:
+            # Try zip-level match first, fall back to MSA-level row
+            fmr_row = None
+            if zip_code:
+                for row in basicdata:
+                    if str(row.get("zip_code", "")) == zip_code:
+                        fmr_row = row
+                        break
+            if fmr_row is None:
+                # First entry is typically "MSA level"
+                fmr_row = basicdata[0]
+        else:
+            # Non-SAFMR response: values directly on top-level data
+            fmr_row = top
 
         try:
             return HUDFairMarketRent(
                 entity_id=entity_id,
-                area_name=fmr_data.get("area_name", fmr_data.get("areaname", "")),
-                year=int(fmr_data.get("year", 0)),
-                fmr_0br=float(fmr_data.get("Efficiency", fmr_data.get("fmr_0", 0))),
-                fmr_1br=float(fmr_data.get("One-Bedroom", fmr_data.get("fmr_1", 0))),
-                fmr_2br=float(fmr_data.get("Two-Bedroom", fmr_data.get("fmr_2", 0))),
-                fmr_3br=float(fmr_data.get("Three-Bedroom", fmr_data.get("fmr_3", 0))),
-                fmr_4br=float(fmr_data.get("Four-Bedroom", fmr_data.get("fmr_4", 0))),
+                area_name=area_name,
+                year=int(year),
+                fmr_0br=float(fmr_row.get("Efficiency", fmr_row.get("fmr_0", 0))),
+                fmr_1br=float(fmr_row.get("One-Bedroom", fmr_row.get("fmr_1", 0))),
+                fmr_2br=float(fmr_row.get("Two-Bedroom", fmr_row.get("fmr_2", 0))),
+                fmr_3br=float(fmr_row.get("Three-Bedroom", fmr_row.get("fmr_3", 0))),
+                fmr_4br=float(fmr_row.get("Four-Bedroom", fmr_row.get("fmr_4", 0))),
             )
         except (ValueError, KeyError) as e:
             logger.warning("Failed to parse HUD FMR response: %s", e)

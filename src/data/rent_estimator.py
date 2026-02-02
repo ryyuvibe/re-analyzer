@@ -245,16 +245,18 @@ class RentEstimator:
             return TierResult(tier="hud", estimate=None, confidence="low", reasoning="Missing FIPS codes")
 
         entity_id = f"{geo.state_fips}{geo.county_fips}99999"
+        zip_code = geo.zip_code
 
-        # Check HUD-specific cache
-        cached_fmr = self.cache.get_hud_cached(entity_id)
+        # Cache key includes zip for zip-level SAFMR areas
+        cache_id = f"{entity_id}:{zip_code}" if zip_code else entity_id
+        cached_fmr = self.cache.get_hud_cached(cache_id)
         if cached_fmr:
             fmr = HUDFairMarketRent(**cached_fmr)
         else:
-            fmr = await self.hud_client.get_fmr(geo.state_fips, geo.county_fips)
+            fmr = await self.hud_client.get_fmr(geo.state_fips, geo.county_fips, zip_code)
             if fmr is None:
                 return TierResult(tier="hud", estimate=None, confidence="low", reasoning="HUD FMR data unavailable")
-            self.cache.set_hud_cached(entity_id, fmr.model_dump())
+            self.cache.set_hud_cached(cache_id, fmr.model_dump())
 
         base_fmr = fmr.fmr_for_beds(beds)
         if base_fmr <= 0:

@@ -1,48 +1,137 @@
-"""Main analysis page — address input and results display."""
+"""Main analysis page — manual entry + address lookup with Go/No-Go scorecard."""
 
 import dash
 from dash import html, dcc, callback, Input, Output, State, no_update
 import plotly.graph_objects as go
 import httpx
-import json
+from decimal import Decimal
+
+from src.engine.proforma import run_proforma
+from src.engine.rehab import estimate_rehab_budget
+from src.models.assumptions import DealAssumptions
+from src.models.investor import InvestorTaxProfile, FilingStatus
+from src.models.rehab import ConditionGrade
 
 dash.register_page(__name__, path="/", name="Analyze")
 
 API_BASE = "http://localhost:8000"
 
+# Go/No-Go thresholds for Ohio rental properties
+SCORECARD_THRESHOLDS = {
+    "after_tax_irr": {"green": 0.12, "yellow": 0.08},
+    "cash_on_cash": {"green": 0.08, "yellow": 0.05},
+    "dscr_yr1": {"green": 1.25, "yellow": 1.10},
+    "equity_multiple": {"green": 2.0, "yellow": 1.5},
+    "cap_rate_yr1": {"green": 0.07, "yellow": 0.05},
+}
+
+BTN_STYLE = {
+    "padding": "0.75rem 2rem",
+    "fontSize": "1rem",
+    "backgroundColor": "#1a1a2e",
+    "color": "white",
+    "border": "none",
+    "cursor": "pointer",
+}
+
+FIELD_STYLE = {"width": "100%", "padding": "0.5rem", "fontSize": "0.95rem"}
+
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
+
+
+def _field(label, component):
+    return html.Div([
+        html.Label(label, style={"fontSize": "0.85rem", "marginBottom": "0.25rem", "display": "block"}),
+        component,
+    ], style={"flex": "1", "minWidth": "140px"})
+
+
 layout = html.Div([
-    # Address Input Section
-    html.Div([
-        html.H2("Property Analysis"),
+    html.H2("Property Analysis"),
+
+    # Mode toggle
+    dcc.RadioItems(
+        id="input-mode",
+        options=[
+            {"label": " Manual Entry", "value": "manual"},
+            {"label": " Address Lookup", "value": "address"},
+        ],
+        value="manual",
+        inline=True,
+        style={"marginBottom": "1rem", "fontSize": "1rem"},
+    ),
+
+    # --- Manual Entry Section ---
+    html.Div(id="manual-section", children=[
+        html.Div([
+            _field("Purchase Price ($)", dcc.Input(id="manual-price", type="number", placeholder="120000", style=FIELD_STYLE)),
+            _field("Monthly Rent ($)", dcc.Input(id="manual-rent", type="number", placeholder="1100", style=FIELD_STYLE)),
+            _field("Sqft", dcc.Input(id="manual-sqft", type="number", placeholder="1200", style=FIELD_STYLE)),
+            _field("Year Built", dcc.Input(id="manual-year-built", type="number", placeholder="1955", style=FIELD_STYLE)),
+        ], style={"display": "flex", "gap": "1rem", "marginBottom": "0.75rem"}),
+        html.Div([
+            _field("Annual Property Tax ($)", dcc.Input(id="manual-tax", type="number", placeholder="2400", style=FIELD_STYLE)),
+            _field("Annual Insurance ($)", dcc.Input(id="manual-insurance", type="number", placeholder="1200", style=FIELD_STYLE)),
+            _field("Bedrooms", dcc.Input(id="manual-beds", type="number", placeholder="3", style=FIELD_STYLE)),
+            _field("Bathrooms", dcc.Input(id="manual-baths", type="number", placeholder="1.5", step=0.5, style=FIELD_STYLE)),
+        ], style={"display": "flex", "gap": "1rem", "marginBottom": "0.75rem"}),
+        html.Div([
+            _field("Address (for display)", dcc.Input(id="manual-address", type="text", placeholder="123 Oak St, Columbus, OH 43215", style=FIELD_STYLE)),
+            html.Div([
+                html.Label("\u00a0", style={"fontSize": "0.85rem", "display": "block"}),
+                html.Button("Analyze", id="manual-analyze-btn", n_clicks=0, style=BTN_STYLE),
+            ], style={"flex": "0 0 auto"}),
+        ], style={"display": "flex", "gap": "1rem", "alignItems": "end"}),
+    ], style={"marginBottom": "1.5rem"}),
+
+    # --- Address Lookup Section ---
+    html.Div(id="address-section", children=[
         html.P("Enter any US address to get a complete investment analysis."),
         html.Div([
             dcc.Input(
                 id="address-input",
                 type="text",
-                placeholder="123 Main St, Austin, TX 78701",
+                placeholder="123 Main St, Columbus, OH 43215",
                 style={"width": "60%", "padding": "0.75rem", "fontSize": "1rem"},
             ),
-            html.Button(
-                "Analyze",
-                id="analyze-btn",
-                n_clicks=0,
-                style={
-                    "padding": "0.75rem 2rem",
-                    "fontSize": "1rem",
-                    "backgroundColor": "#1a1a2e",
-                    "color": "white",
-                    "border": "none",
-                    "cursor": "pointer",
-                    "marginLeft": "0.5rem",
-                },
-            ),
+            html.Button("Analyze", id="analyze-btn", n_clicks=0, style=BTN_STYLE),
         ], style={"display": "flex", "gap": "0.5rem"}),
-        dcc.Loading(
-            id="loading",
-            children=[html.Div(id="loading-output")],
-            type="circle",
-        ),
-    ], style={"marginBottom": "2rem"}),
+    ], style={"display": "none", "marginBottom": "1.5rem"}),
+
+    # --- Rehab Section (shared) ---
+    html.Div([
+        html.H4("Rehab", style={"marginBottom": "0.5rem"}),
+        html.Div([
+            html.Div([
+                html.Label("Condition Grade"),
+                dcc.Dropdown(
+                    id="condition-grade",
+                    options=[
+                        {"label": "Turnkey (no rehab)", "value": "turnkey"},
+                        {"label": "Light (~$6/sqft)", "value": "light"},
+                        {"label": "Medium (~$21/sqft)", "value": "medium"},
+                        {"label": "Heavy (~$43/sqft)", "value": "heavy"},
+                        {"label": "Full Gut (~$65/sqft)", "value": "full_gut"},
+                    ],
+                    value="turnkey",
+                    clearable=False,
+                ),
+            ], style={"width": "40%"}),
+            html.Div([
+                html.Label("Rehab Months (optional override)"),
+                dcc.Input(id="rehab-months", type="number", placeholder="auto", style=FIELD_STYLE),
+            ], style={"width": "20%"}),
+        ], style={"display": "flex", "gap": "1rem"}),
+    ], style={"marginBottom": "1.5rem"}),
+
+    # Loading spinner
+    dcc.Loading(
+        id="loading",
+        children=[html.Div(id="loading-output")],
+        type="circle",
+    ),
 
     # Investor Profile (collapsible)
     html.Details([
@@ -80,40 +169,299 @@ layout = html.Div([
 ])
 
 
+# ---------------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    [Output("address-section", "style"), Output("manual-section", "style")],
+    Input("input-mode", "value"),
+)
+def toggle_input_mode(mode):
+    if mode == "address":
+        return {"display": "block", "marginBottom": "1.5rem"}, {"display": "none"}
+    return {"display": "none"}, {"display": "block", "marginBottom": "1.5rem"}
+
+
 @callback(
     [Output("results-container", "children"), Output("loading-output", "children")],
-    Input("analyze-btn", "n_clicks"),
+    [Input("analyze-btn", "n_clicks"), Input("manual-analyze-btn", "n_clicks")],
     [
         State("address-input", "value"),
+        State("manual-price", "value"),
+        State("manual-rent", "value"),
+        State("manual-sqft", "value"),
+        State("manual-year-built", "value"),
+        State("manual-tax", "value"),
+        State("manual-insurance", "value"),
+        State("manual-beds", "value"),
+        State("manual-baths", "value"),
+        State("manual-address", "value"),
+        State("condition-grade", "value"),
+        State("rehab-months", "value"),
         State("filing-status", "value"),
         State("agi-input", "value"),
         State("fed-rate", "value"),
         State("state-rate", "value"),
+        State("input-mode", "value"),
     ],
     prevent_initial_call=True,
 )
-def run_analysis(n_clicks, address, filing_status, agi, fed_rate, state_rate):
+def run_analysis(
+    addr_clicks, manual_clicks,
+    address,
+    price, rent, sqft, year_built, prop_tax, insurance, beds, baths, manual_address,
+    condition_grade, rehab_months,
+    filing_status, agi, fed_rate, state_rate,
+    input_mode,
+):
+    triggered = dash.ctx.triggered_id
+    if triggered == "analyze-btn":
+        return _run_address_mode(
+            address, condition_grade, rehab_months,
+            filing_status, agi, fed_rate, state_rate,
+        )
+    elif triggered == "manual-analyze-btn":
+        return _run_manual_mode(
+            price, rent, sqft, year_built, prop_tax, insurance, beds, baths, manual_address,
+            condition_grade, rehab_months,
+            filing_status, agi, fed_rate, state_rate,
+        )
+    return no_update, no_update
+
+
+# ---------------------------------------------------------------------------
+# Mode handlers
+# ---------------------------------------------------------------------------
+
+
+def _run_address_mode(address, condition_grade, rehab_months,
+                      filing_status, agi, fed_rate, state_rate):
     if not address:
         return no_update, no_update
-
     try:
-        resp = httpx.post(
-            f"{API_BASE}/api/v1/analyze",
-            json={
-                "address": address,
-                "filing_status": filing_status,
-                "agi": agi,
-                "marginal_federal_rate": fed_rate / 100 if fed_rate else 0.37,
-                "marginal_state_rate": state_rate / 100 if state_rate else 0.133,
-            },
-            timeout=30.0,
-        )
+        payload = {
+            "address": address,
+            "filing_status": filing_status,
+            "agi": agi,
+            "marginal_federal_rate": fed_rate / 100 if fed_rate else 0.37,
+            "marginal_state_rate": state_rate / 100 if state_rate else 0.133,
+        }
+        if condition_grade and condition_grade != "turnkey":
+            payload["condition_grade"] = condition_grade
+        if rehab_months:
+            payload["rehab_months"] = int(rehab_months)
+        resp = httpx.post(f"{API_BASE}/api/v1/analyze", json=payload, timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         return html.Div(f"Error: {e}", style={"color": "red"}), ""
 
-    return _build_results(data), ""
+    return html.Div([_build_scorecard(data), _build_results(data)]), ""
+
+
+def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
+                     beds, baths, manual_address,
+                     condition_grade, rehab_months,
+                     filing_status, agi, fed_rate, state_rate):
+    if not price or not rent:
+        return html.Div(
+            "Purchase price and monthly rent are required.",
+            style={"color": "red", "padding": "1rem"},
+        ), ""
+
+    try:
+        sqft = int(sqft) if sqft else 1200
+        year_built = int(year_built) if year_built else 1970
+
+        grade = ConditionGrade(condition_grade or "turnkey")
+        rehab_budget = estimate_rehab_budget(
+            sqft=sqft,
+            year_built=year_built,
+            condition_grade=grade,
+            rehab_months=int(rehab_months) if rehab_months else None,
+        )
+
+        assumptions = DealAssumptions(
+            purchase_price=Decimal(str(price)),
+            monthly_rent=Decimal(str(rent)),
+            property_tax=Decimal(str(prop_tax or 0)),
+            insurance=Decimal(str(insurance or 1200)),
+            rehab_budget=rehab_budget,
+        )
+
+        investor = InvestorTaxProfile(
+            filing_status=FilingStatus(filing_status or "married_filing_jointly"),
+            agi=Decimal(str(agi or 400000)),
+            marginal_federal_rate=Decimal(str((fed_rate or 37) / 100)),
+            marginal_state_rate=Decimal(str((state_rate or 13.3) / 100)),
+            state="OH",
+        )
+
+        result = run_proforma(assumptions, investor)
+        data = _result_to_display_dict(
+            result, manual_address, beds, baths, sqft, year_built, price, rent, prop_tax,
+        )
+    except Exception as e:
+        return html.Div(f"Error: {e}", style={"color": "red", "padding": "1rem"}), ""
+
+    return html.Div([_build_scorecard(data), _build_results(data)]), ""
+
+
+# ---------------------------------------------------------------------------
+# Engine result → display dict adapter
+# ---------------------------------------------------------------------------
+
+
+def _result_to_display_dict(result, address, beds, baths, sqft, year_built,
+                            price, rent, prop_tax):
+    return {
+        "property": {
+            "street": address or "Manual Entry",
+            "city": "",
+            "state": "OH",
+            "zip_code": "",
+            "bedrooms": int(beds) if beds else 0,
+            "bathrooms": float(baths) if baths else 0,
+            "sqft": int(sqft) if sqft else 0,
+            "year_built": int(year_built) if year_built else 0,
+            "estimated_value": float(price),
+            "estimated_rent": float(rent),
+            "annual_tax": float(prop_tax) if prop_tax else 0,
+        },
+        "total_initial_investment": float(result.total_initial_investment),
+        "after_tax_irr": float(result.after_tax_irr),
+        "before_tax_irr": float(result.before_tax_irr),
+        "equity_multiple": float(result.equity_multiple),
+        "average_cash_on_cash": float(result.average_cash_on_cash),
+        "total_profit": float(result.total_profit),
+        "net_tax_impact": float(result.net_tax_impact),
+        "rehab_total_cost": float(result.rehab_total_cost),
+        "rehab_months": result.rehab_months,
+        "yearly_projections": [
+            {
+                "year": p.year,
+                "gross_rent": float(p.gross_rent),
+                "effective_gross_income": float(p.effective_gross_income),
+                "total_expenses": float(p.total_expenses),
+                "noi": float(p.noi),
+                "debt_service": float(p.debt_service),
+                "cash_flow_before_tax": float(p.cash_flow_before_tax),
+                "cash_flow_after_tax": float(p.cash_flow_after_tax),
+                "total_depreciation": float(p.total_depreciation),
+                "taxable_income": float(p.taxable_income),
+                "suspended_loss": float(p.suspended_loss),
+                "tax_benefit": float(p.tax_benefit),
+                "property_value": float(p.property_value),
+                "equity": float(p.equity),
+                "cap_rate": float(p.cap_rate),
+                "cash_on_cash": float(p.cash_on_cash),
+                "dscr": float(p.dscr),
+                "rent_months": p.rent_months,
+            }
+            for p in result.yearly_projections
+        ],
+        "disposition": {
+            "sale_price": float(result.disposition.sale_price),
+            "selling_costs": float(result.disposition.selling_costs),
+            "net_sale_proceeds": float(result.disposition.net_sale_proceeds),
+            "total_gain": float(result.disposition.total_gain),
+            "depreciation_recapture": float(result.disposition.depreciation_recapture),
+            "capital_gain": float(result.disposition.capital_gain),
+            "recapture_tax": float(result.disposition.recapture_tax),
+            "capital_gains_tax": float(result.disposition.capital_gains_tax),
+            "niit_on_gain": float(result.disposition.niit_on_gain),
+            "state_tax_on_gain": float(result.disposition.state_tax_on_gain),
+            "suspended_losses_released": float(result.disposition.suspended_losses_released),
+            "tax_benefit_from_release": float(result.disposition.tax_benefit_from_release),
+            "total_tax_on_sale": float(result.disposition.total_tax_on_sale),
+            "after_tax_sale_proceeds": float(result.disposition.after_tax_sale_proceeds),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scorecard
+# ---------------------------------------------------------------------------
+
+
+def _traffic_color(value, thresholds):
+    if value >= thresholds["green"]:
+        return "#2ecc71"
+    elif value >= thresholds["yellow"]:
+        return "#f39c12"
+    return "#e94560"
+
+
+def _scorecard_metric(label, display_value, color):
+    return html.Div([
+        html.Div(style={
+            "height": "4px", "backgroundColor": color,
+            "borderRadius": "2px 2px 0 0",
+        }),
+        html.Div([
+            html.Div(display_value, style={"fontSize": "1.3rem", "fontWeight": "bold"}),
+            html.Div(label, style={"fontSize": "0.8rem", "color": "#666"}),
+        ], style={"padding": "0.75rem 1rem", "textAlign": "center"}),
+    ], style={
+        "backgroundColor": "white", "border": "1px solid #ddd",
+        "borderRadius": "8px", "minWidth": "140px", "overflow": "hidden",
+    })
+
+
+def _build_scorecard(data):
+    irr = float(data["after_tax_irr"])
+    coc = float(data["average_cash_on_cash"])
+    projections = data["yearly_projections"]
+    dscr_yr1 = float(projections[0]["dscr"]) if projections else 0
+    cap_yr1 = float(projections[0]["cap_rate"]) if projections else 0
+    eq_mult = float(data["equity_multiple"])
+
+    metrics = [
+        ("After-Tax IRR", irr, f"{irr * 100:.1f}%", SCORECARD_THRESHOLDS["after_tax_irr"]),
+        ("Avg Cash-on-Cash", coc, f"{coc * 100:.1f}%", SCORECARD_THRESHOLDS["cash_on_cash"]),
+        ("Year-1 DSCR", dscr_yr1, f"{dscr_yr1:.2f}", SCORECARD_THRESHOLDS["dscr_yr1"]),
+        ("Equity Multiple", eq_mult, f"{eq_mult:.2f}x", SCORECARD_THRESHOLDS["equity_multiple"]),
+        ("Year-1 Cap Rate", cap_yr1, f"{cap_yr1 * 100:.1f}%", SCORECARD_THRESHOLDS["cap_rate_yr1"]),
+    ]
+
+    colors = [_traffic_color(val, thresh) for _, val, _, thresh in metrics]
+    red_count = colors.count("#e94560")
+    green_count = colors.count("#2ecc71")
+
+    if red_count >= 2:
+        verdict, verdict_color = "PASS", "#e94560"
+        verdict_text = "Too many metrics below threshold. Likely not worth pursuing."
+    elif red_count == 0 and green_count >= 3:
+        verdict, verdict_color = "GO", "#2ecc71"
+        verdict_text = "Strong deal. Meets or exceeds targets on key metrics."
+    else:
+        verdict, verdict_color = "DIG DEEPER", "#f39c12"
+        verdict_text = "Mixed signals. Worth a closer look before committing."
+
+    verdict_banner = html.Div([
+        html.Div(verdict, style={
+            "fontSize": "2rem", "fontWeight": "bold", "color": verdict_color,
+        }),
+        html.Div(verdict_text, style={"fontSize": "0.95rem", "color": "#666"}),
+    ], style={
+        "textAlign": "center", "padding": "1rem",
+        "border": f"3px solid {verdict_color}", "borderRadius": "12px",
+        "marginBottom": "1rem",
+    })
+
+    metric_cards = html.Div([
+        _scorecard_metric(label, display, _traffic_color(val, thresh))
+        for label, val, display, thresh in metrics
+    ], style={"display": "flex", "gap": "0.75rem", "flexWrap": "wrap", "marginBottom": "2rem"})
+
+    return html.Div([verdict_banner, metric_cards])
+
+
+# ---------------------------------------------------------------------------
+# Detailed results (unchanged logic, minor property field guards)
+# ---------------------------------------------------------------------------
 
 
 def _build_results(data):
@@ -132,12 +480,43 @@ def _build_results(data):
         _metric_card("Net Tax Impact", f"${float(data['net_tax_impact']):,.0f}"),
     ], style={"display": "flex", "gap": "1rem", "marginBottom": "2rem", "flexWrap": "wrap"})
 
-    # Property summary
+    # Property summary — guard for empty fields in manual mode
+    addr_parts = [prop.get("street", "")]
+    if prop.get("city"):
+        addr_parts.append(prop["city"])
+    state_zip = " ".join(filter(None, [prop.get("state", ""), prop.get("zip_code", "")]))
+    if state_zip:
+        addr_parts.append(state_zip)
+    addr_str = ", ".join(filter(None, addr_parts))
+
+    detail_parts = []
+    if prop.get("bedrooms"):
+        detail_parts.append(f"{prop['bedrooms']}bd")
+    if prop.get("bathrooms"):
+        detail_parts.append(f"{prop['bathrooms']}ba")
+    if prop.get("sqft"):
+        detail_parts.append(f"{prop['sqft']:,} sqft")
+    if prop.get("year_built"):
+        detail_parts.append(f"Built {prop['year_built']}")
+
     prop_card = html.Div([
-        html.H3(f"{prop['street']}, {prop['city']}, {prop['state']} {prop['zip_code']}"),
-        html.P(f"{prop['bedrooms']}bd / {prop['bathrooms']}ba · {prop['sqft']:,} sqft · Built {prop['year_built']}"),
-        html.P(f"Value: ${float(prop['estimated_value']):,.0f} · Rent: ${float(prop['estimated_rent']):,.0f}/mo"),
+        html.H3(addr_str or "Property"),
+        html.P(" · ".join(detail_parts)) if detail_parts else None,
+        html.P(f"Value: ${float(prop.get('estimated_value', 0)):,.0f} · Rent: ${float(prop.get('estimated_rent', 0)):,.0f}/mo"),
     ], style={"backgroundColor": "#f5f5f5", "padding": "1rem", "borderRadius": "8px", "marginBottom": "2rem"})
+
+    # Rehab info (if applicable)
+    rehab_info = None
+    rehab_cost = float(data.get("rehab_total_cost", 0))
+    rehab_mo = data.get("rehab_months", 0)
+    if rehab_cost > 0 or rehab_mo > 0:
+        rehab_info = html.Div([
+            html.P(f"Rehab Cost: ${rehab_cost:,.0f} · Rehab Period: {rehab_mo} months · Year 1 Rent: {12 - rehab_mo} months",
+                   style={"fontWeight": "bold"}),
+        ], style={
+            "backgroundColor": "#fff3cd", "padding": "0.75rem 1rem",
+            "borderRadius": "8px", "marginBottom": "1.5rem", "border": "1px solid #ffc107",
+        })
 
     # Cash flow chart
     cf_fig = go.Figure()
@@ -198,9 +577,13 @@ def _build_results(data):
         style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.9rem"},
     )
 
-    return html.Div([
+    children = [
         summary,
         prop_card,
+    ]
+    if rehab_info:
+        children.append(rehab_info)
+    children.extend([
         html.Div([
             dcc.Graph(figure=cf_fig, style={"width": "50%"}),
             dcc.Graph(figure=equity_fig, style={"width": "50%"}),
@@ -219,6 +602,8 @@ def _build_results(data):
                    style={"fontWeight": "bold"}),
         ], style={"backgroundColor": "#f5f5f5", "padding": "1rem", "borderRadius": "8px"}),
     ])
+
+    return html.Div(children)
 
 
 def _metric_card(label, value):

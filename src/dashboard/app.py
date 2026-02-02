@@ -1,5 +1,14 @@
 """Plotly Dash application — multi-page layout."""
 
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path so `src.*` imports work
+# even when Dash's reloader spawns a child process.
+_project_root = str(Path(__file__).resolve().parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import dash
 from dash import Dash, html, dcc, page_container
 

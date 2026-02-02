@@ -1,0 +1,30 @@
+{
+  "description": "Default cost segregation allocations by property type",
+  "note": "Values are percentages of depreciable basis reclassified from 27.5-year to shorter MACRS classes",
+  "profiles": {
+    "none": {
+      "description": "No cost segregation study",
+      "five_year": 0,
+      "seven_year": 0,
+      "fifteen_year": 0
+    },
+    "conservative": {
+      "description": "Conservative cost seg study - typical for older SFR",
+      "five_year": 10,
+      "seven_year": 3,
+      "fifteen_year": 5
+    },
+    "moderate": {
+      "description": "Moderate cost seg study - typical for newer SFR or small multi",
+      "five_year": 15,
+      "seven_year": 5,
+      "fifteen_year": 8
+    },
+    "aggressive": {
+      "description": "Aggressive cost seg study - typical for commercial or large multi",
+      "five_year": 20,
+      "seven_year": 7,
+      "fifteen_year": 12
+    }
+  }
+}

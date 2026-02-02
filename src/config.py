@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     walkscore_api_key: str = ""
     greatschools_api_key: str = ""
     anthropic_api_key: str = ""
+    hud_api_key: str = ""
+
+    # Rent estimator
+    rentcast_monthly_limit: int = 500
 
     # App
     secret_key: str = "change-me-in-production"

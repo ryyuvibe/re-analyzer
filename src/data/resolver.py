@@ -13,7 +13,9 @@ from src.models.property import PropertyDetail, Address
 from src.models.neighborhood import NeighborhoodReport
 from src.models.smart_assumptions import MacroContext
 from src.data.geocode import geocode_address
+from src.data.rent_estimator import RentEstimator
 from src.data.rentcast import RentCastClient
+from src.models.rent_estimate import RentEstimate
 from src.data.county_assessor import estimate_annual_tax, get_property_tax_rate
 from src.data.census import CensusClient
 from src.data.walkscore import get_walk_score
@@ -36,11 +38,14 @@ class PropertyResolver:
     def __init__(self, rentcast_client: RentCastClient | None = None):
         self.rentcast = rentcast_client or RentCastClient()
         self.census = CensusClient()
+        self.rent_estimator = RentEstimator()
 
-    async def resolve(self, raw_address: str) -> PropertyDetail:
+    async def resolve(self, raw_address: str) -> tuple[PropertyDetail, RentEstimate | None]:
         """Resolve a raw address string into a complete PropertyDetail.
 
         Orchestrates: geocode → property data → rent estimate → tax estimate
+
+        Returns (PropertyDetail, RentEstimate | None) tuple.
         """
         # Step 1: Geocode
         address = await geocode_address(raw_address)
@@ -59,10 +64,23 @@ class PropertyResolver:
                 year_built=0,
             )
 
-        # Step 3: Rent estimate
-        rent = await self.rentcast.get_rent_estimate(address)
-        if rent:
-            prop = replace(prop, estimated_rent=rent)
+        # Step 3: Rent estimate (tiered: LLM → HUD FMR → RentCast)
+        rent_estimate: RentEstimate | None = None
+        try:
+            rent_estimate = await self.rent_estimator.estimate_rent(
+                address=address.full,
+                beds=prop.bedrooms,
+                baths=float(prop.bathrooms),
+                sqft=prop.sqft,
+                property_type=prop.property_type,
+            )
+            if rent_estimate and rent_estimate.estimated_rent > 0:
+                prop = replace(prop, estimated_rent=Decimal(str(rent_estimate.estimated_rent)))
+        except Exception as e:
+            logger.warning("Tiered rent estimation failed, falling back to RentCast: %s", e)
+            rent = await self.rentcast.get_rent_estimate(address)
+            if rent:
+                prop = replace(prop, estimated_rent=rent)
 
         # Step 4: Value estimate
         value = await self.rentcast.get_value_estimate(address)
@@ -79,17 +97,17 @@ class PropertyResolver:
         rental_comps = await self.rentcast.get_rental_comps(address)
         prop = replace(prop, sale_comps=sale_comps, rental_comps=rental_comps)
 
-        return prop
+        return prop, rent_estimate
 
     async def resolve_with_neighborhood(
         self, raw_address: str
-    ) -> tuple[PropertyDetail, NeighborhoodReport | None]:
+    ) -> tuple[PropertyDetail, NeighborhoodReport | None, RentEstimate | None]:
         """Resolve property data plus neighborhood intelligence.
 
-        Returns (PropertyDetail, NeighborhoodReport) tuple.
+        Returns (PropertyDetail, NeighborhoodReport, RentEstimate) tuple.
         The report may be None if all neighborhood data sources fail.
         """
-        prop = await self.resolve(raw_address)
+        prop, rent_estimate = await self.resolve(raw_address)
         addr = prop.address
         state = addr.state or "OH"
         lat = float(addr.latitude) if addr.latitude else 0.0
@@ -182,18 +200,18 @@ class PropertyResolver:
             traffic_noise_score=traffic_noise,
         )
 
-        return prop, report
+        return prop, report, rent_estimate
 
     async def resolve_full(
         self, raw_address: str
-    ) -> tuple[PropertyDetail, NeighborhoodReport | None, MacroContext]:
+    ) -> tuple[PropertyDetail, NeighborhoodReport | None, MacroContext, RentEstimate | None]:
         """Full resolution: property + neighborhood + macro context.
 
-        Returns (PropertyDetail, NeighborhoodReport | None, MacroContext).
+        Returns (PropertyDetail, NeighborhoodReport | None, MacroContext, RentEstimate | None).
         """
-        prop, neighborhood = await self.resolve_with_neighborhood(raw_address)
+        prop, neighborhood, rent_estimate = await self.resolve_with_neighborhood(raw_address)
 
         macro_fetcher = MacroDataFetcher()
         macro = await macro_fetcher.fetch()
 
-        return prop, neighborhood, macro
+        return prop, neighborhood, macro, rent_estimate

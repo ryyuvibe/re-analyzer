@@ -27,6 +27,7 @@ from src.data.closing_costs import estimate_closing_costs
 from src.data.climate import get_climate_zone
 from src.data.noaa_hazards import get_hurricane_zone, get_hail_frequency
 from src.data.fbi_crime import get_crime_rate
+from src.models.rent_estimate import RentEstimate
 
 
 def _detail(
@@ -76,6 +77,7 @@ def build_smart_assumptions(
     overrides: UserOverrides | None = None,
     condition_grade: str = "turnkey",
     rehab_budget: RehabBudget | None = None,
+    rent_estimate: RentEstimate | None = None,
 ) -> tuple[DealAssumptions, AssumptionManifest]:
     """Build DealAssumptions from property data + overrides, with full manifest.
 
@@ -158,7 +160,16 @@ def build_smart_assumptions(
     # Monthly Rent
     # ------------------------------------------------------------------
     est_rent = prop.estimated_rent or Decimal("0")
-    if est_rent > 0:
+    if rent_estimate and rent_estimate.estimated_rent > 0:
+        est_rent = Decimal(str(rent_estimate.estimated_rent))
+        rent_source = AssumptionSource.API_FETCHED
+        conf_map = {"high": Confidence.HIGH, "medium": Confidence.MEDIUM, "low": Confidence.LOW}
+        rent_conf = conf_map.get(rent_estimate.confidence, Confidence.MEDIUM)
+        tiers_used = ", ".join(
+            t.tier.upper() for t in rent_estimate.tier_results if t.estimate
+        )
+        rent_just = f"Tiered estimate ${float(est_rent):,.0f}/mo ({tiers_used}, {rent_estimate.confidence} confidence)"
+    elif est_rent > 0:
         rent_source = AssumptionSource.API_FETCHED
         rent_conf = Confidence.HIGH
         rent_just = f"RentCast rent AVM: ${float(est_rent):,.0f}/mo"

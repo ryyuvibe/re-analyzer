@@ -19,12 +19,15 @@ from src.api.schemas import (
     SchoolResponse,
     AssumptionDetailResponse,
     AssumptionManifestResponse,
+    RentEstimateResponse,
+    RentTierResponse,
 )
 from src.api.deps import get_resolver
 from src.data.resolver import PropertyResolver
 from src.models.assumptions import DealAssumptions, CostSegAllocation
 from src.models.investor import InvestorTaxProfile, FilingStatus
 from src.models.neighborhood import NeighborhoodReport
+from src.models.rent_estimate import RentEstimate
 from src.models.smart_assumptions import UserOverrides, AssumptionManifest
 from src.models.rehab import ConditionGrade
 from src.engine.proforma import run_proforma
@@ -138,9 +141,29 @@ def _neighborhood_to_response(report: NeighborhoodReport) -> NeighborhoodReportR
     )
 
 
+def _rent_estimate_to_response(rent_est: RentEstimate) -> RentEstimateResponse:
+    """Convert engine RentEstimate to API response."""
+    return RentEstimateResponse(
+        estimated_rent=rent_est.estimated_rent,
+        confidence=rent_est.confidence,
+        confidence_score=rent_est.confidence_score,
+        needs_review=rent_est.needs_review,
+        tier_results=[
+            RentTierResponse(
+                tier=t.tier,
+                estimate=t.estimate,
+                confidence=t.confidence,
+                reasoning=t.reasoning,
+            )
+            for t in rent_est.tier_results
+        ],
+        recommended_range=rent_est.recommended_range,
+    )
+
+
 def _result_to_response(
     result, prop_detail, rehab_budget=None, estimated_insurance=None,
-    neighborhood_report=None, loan_type=None, manifest=None,
+    neighborhood_report=None, loan_type=None, rent_estimate=None, manifest=None,
 ) -> AnalysisResponse:
     """Convert engine AnalysisResult to API response."""
     yearly = [
@@ -219,6 +242,10 @@ def _result_to_response(
     if neighborhood_report is not None:
         neighborhood_resp = _neighborhood_to_response(neighborhood_report)
 
+    rent_est_resp = None
+    if rent_estimate is not None:
+        rent_est_resp = _rent_estimate_to_response(rent_estimate)
+
     manifest_resp = None
     if manifest is not None:
         manifest_resp = _manifest_to_response(manifest)
@@ -243,6 +270,7 @@ def _result_to_response(
         estimated_insurance=estimated_insurance,
         neighborhood=neighborhood_resp,
         loan_type=loan_type,
+        rent_estimate=rent_est_resp,
         assumption_manifest=manifest_resp,
     )
 
@@ -259,8 +287,9 @@ async def analyze(
     # Resolve property data + neighborhood + macro
     neighborhood_report = None
     macro = None
+    rent_estimate = None
     try:
-        prop, neighborhood_report, macro = await resolver.resolve_full(req.address)
+        prop, neighborhood_report, macro, rent_estimate = await resolver.resolve_full(req.address)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -293,6 +322,7 @@ async def analyze(
             overrides=overrides,
             condition_grade=condition_grade,
             rehab_budget=rehab_budget,
+            rent_estimate=rent_estimate,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -306,6 +336,7 @@ async def analyze(
         estimated_insurance=assumptions.insurance,
         neighborhood_report=neighborhood_report,
         loan_type=assumptions.loan_type,
+        rent_estimate=rent_estimate,
         manifest=manifest,
     )
 

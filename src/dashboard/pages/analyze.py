@@ -362,6 +362,8 @@ def _run_address_mode(address, purchase_price_override, condition_grade, rehab_m
     children = [_build_scorecard(data), _build_results(data)]
     if data.get("assumption_manifest"):
         children.insert(1, _build_assumption_panel(data["assumption_manifest"]))
+    if data.get("rent_estimate"):
+        children.insert(2, _build_rent_breakdown(data["rent_estimate"]))
     if data.get("neighborhood"):
         children.append(_build_neighborhood_report(data["neighborhood"]))
     return html.Div(children), "", data
@@ -734,10 +736,22 @@ def _build_results(data):
     if prop.get("year_built"):
         detail_parts.append(f"Built {prop['year_built']}")
 
+    # Rent display with confidence badge and range if available
+    rent_val = float(prop.get('estimated_rent', 0))
+    rent_display = f"Rent: ${rent_val:,.0f}/mo"
+    rent_est = data.get("rent_estimate")
+    if rent_est:
+        conf = rent_est.get("confidence", "")
+        rng = rent_est.get("recommended_range")
+        if conf:
+            rent_display += f" ({conf} confidence)"
+        if rng and len(rng) == 2:
+            rent_display += f" · Range: ${rng[0]:,.0f}–${rng[1]:,.0f}"
+
     prop_card = html.Div([
         html.H3(addr_str or "Property"),
         html.P(" · ".join(detail_parts)) if detail_parts else None,
-        html.P(f"Value: ${float(prop.get('estimated_value', 0)):,.0f} · Rent: ${float(prop.get('estimated_rent', 0)):,.0f}/mo"),
+        html.P(f"Value: ${float(prop.get('estimated_value', 0)):,.0f} · {rent_display}"),
     ], style={"backgroundColor": "#f5f5f5", "padding": "1rem", "borderRadius": "8px", "marginBottom": "2rem"})
 
     # Rehab info
@@ -853,6 +867,83 @@ def _metric_card(label, value):
         "minWidth": "150px",
         "textAlign": "center",
     })
+
+
+# ---------------------------------------------------------------------------
+# Rent Estimate Breakdown
+# ---------------------------------------------------------------------------
+
+
+def _build_rent_breakdown(rent_estimate):
+    """Build the rent tier breakdown panel from API response data."""
+    if not rent_estimate:
+        return html.Div()
+
+    sections = []
+
+    # Needs review warning
+    if rent_estimate.get("needs_review"):
+        sections.append(html.Div(
+            "Rent tiers diverge by >20%. Review recommended before relying on this estimate.",
+            style={
+                "backgroundColor": "#fff3cd", "color": "#856404",
+                "padding": "0.75rem 1rem", "borderRadius": "8px",
+                "border": "1px solid #ffc107", "marginBottom": "1rem",
+                "fontWeight": "bold", "fontSize": "0.9rem",
+            },
+        ))
+
+    # Tier results table
+    tier_results = rent_estimate.get("tier_results", [])
+    if tier_results:
+        header = html.Tr([
+            html.Th("Tier", style={"textAlign": "left", "padding": "0.5rem"}),
+            html.Th("Estimate", style={"textAlign": "right", "padding": "0.5rem"}),
+            html.Th("Confidence", style={"textAlign": "center", "padding": "0.5rem"}),
+            html.Th("Reasoning", style={"textAlign": "left", "padding": "0.5rem"}),
+        ])
+        rows = []
+        for t in tier_results:
+            est = t.get("estimate")
+            est_str = f"${est:,.0f}" if est else "—"
+            conf = t.get("confidence", "low")
+            conf_color = CONFIDENCE_COLORS.get(conf, "#999")
+            rows.append(html.Tr([
+                html.Td(
+                    t.get("tier", "").upper(),
+                    style={"padding": "0.5rem", "fontWeight": "bold"},
+                ),
+                html.Td(
+                    est_str,
+                    style={"padding": "0.5rem", "textAlign": "right", "fontWeight": "bold"},
+                ),
+                html.Td(
+                    html.Span(conf.title(), style={
+                        "backgroundColor": conf_color, "color": "white",
+                        "fontSize": "0.75rem", "fontWeight": "bold",
+                        "padding": "2px 8px", "borderRadius": "4px",
+                    }),
+                    style={"padding": "0.5rem", "textAlign": "center"},
+                ),
+                html.Td(
+                    t.get("reasoning", ""),
+                    style={"padding": "0.5rem", "fontSize": "0.85rem", "color": "#555"},
+                ),
+            ]))
+
+        sections.append(html.Table(
+            [html.Thead(header), html.Tbody(rows)],
+            style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.9rem"},
+        ))
+
+    return html.Div(
+        [html.H4("Rent Estimate Breakdown", style={"marginBottom": "0.75rem"})] + sections,
+        style={
+            "backgroundColor": "#f8f9fa", "padding": "1rem 1.5rem",
+            "borderRadius": "8px", "marginBottom": "2rem",
+            "border": "1px solid #dee2e6",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1152,8 @@ def restore_from_store(data):
     children = [_build_scorecard(data), _build_results(data)]
     if data.get("assumption_manifest"):
         children.insert(1, _build_assumption_panel(data["assumption_manifest"]))
+    if data.get("rent_estimate"):
+        children.insert(2, _build_rent_breakdown(data["rent_estimate"]))
     if data.get("neighborhood"):
         children.append(_build_neighborhood_report(data["neighborhood"]))
     return html.Div(children)

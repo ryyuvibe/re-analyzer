@@ -190,6 +190,22 @@ class NeighborhoodReportResponse(BaseModel):
     traffic_noise_score: int | None = None
 
 
+class RentTierResponse(BaseModel):
+    tier: str
+    estimate: float | None
+    confidence: str
+    reasoning: str
+
+
+class RentEstimateResponse(BaseModel):
+    estimated_rent: float
+    confidence: str
+    confidence_score: float
+    needs_review: bool
+    tier_results: list[RentTierResponse]
+    recommended_range: tuple[float, float]
+
+
 class AssumptionDetailResponse(BaseModel):
     field_name: str
     value: Decimal
@@ -224,6 +240,7 @@ class AnalysisResponse(BaseModel):
     estimated_insurance: Decimal | None = None
     neighborhood: NeighborhoodReportResponse | None = None
     loan_type: str | None = None
+    rent_estimate: RentEstimateResponse | None = None
     assumption_manifest: AssumptionManifestResponse | None = None
 
 

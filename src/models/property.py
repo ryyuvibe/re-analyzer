@@ -49,6 +49,9 @@ class PropertyDetail:
     # Sale comps
     sale_comps: list["SaleComp"] = field(default_factory=list)
 
+    # Image
+    image_url: str | None = None
+
 
 @dataclass(frozen=True)
 class RentalComp:

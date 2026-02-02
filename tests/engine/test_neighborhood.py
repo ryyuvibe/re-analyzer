@@ -15,7 +15,7 @@ from src.models.neighborhood import (
 
 class TestNeighborhoodGrading:
     def test_premium_neighborhood_grade_a(self):
-        """High income, great schools, walkable, low poverty → A."""
+        """High income, great schools, walkable, low poverty, low crime → A."""
         demographics = NeighborhoodDemographics(
             median_household_income=120_000,
             median_home_value=350_000,
@@ -29,7 +29,10 @@ class TestNeighborhoodGrading:
             SchoolInfo(name="Central Middle", rating=8, level="middle", distance_miles=Decimal("1.0")),
             SchoolInfo(name="West High", rating=9, level="high", distance_miles=Decimal("1.5")),
         ]
-        grade, score = compute_neighborhood_grade(demographics, walk, schools)
+        grade, score = compute_neighborhood_grade(
+            demographics, walk, schools,
+            crime_rate=Decimal("1000"),
+        )
         assert grade == NeighborhoodGrade.A
         assert score >= Decimal("80")
 
@@ -82,9 +85,9 @@ class TestNeighborhoodGrading:
     def test_all_none_data_returns_neutral(self):
         """No data → neutral scores, grade C."""
         grade, score = compute_neighborhood_grade(None, None, [])
-        # All components return neutral (12 each) = 48
+        # Neutral: income=10, schools=10, walk=7, housing=7, safety=10, hazard=10 = 54
         assert grade == NeighborhoodGrade.C
-        assert score == Decimal("48.0")
+        assert score == Decimal("54.0")
 
     def test_partial_data_demographics_only(self):
         """Only demographics provided, no walk score or schools."""
@@ -94,7 +97,7 @@ class TestNeighborhoodGrading:
             renter_pct=Decimal("0.35"),
         )
         grade, score = compute_neighborhood_grade(demographics, None, [])
-        # income=25 + schools=12(neutral) + walk=12(neutral) + housing=25
+        # income=20 + schools=10(neutral) + walk=7(neutral) + housing=15 + safety=10 + hazard=10 = 72
         assert grade in (NeighborhoodGrade.B, NeighborhoodGrade.A)
 
     def test_grade_thresholds_boundaries(self):
@@ -124,7 +127,54 @@ class TestNeighborhoodGrading:
             SchoolInfo(name="S2", rating=4, level="middle", distance_miles=Decimal("1.0")),
             SchoolInfo(name="S3", rating=6, level="high", distance_miles=Decimal("1.5")),
         ]
-        # avg rating = 6.0, school score = 6/10 * 25 = 15
+        # avg rating = 6.0, school score = 6/10 * 20 = 12
         grade, score = compute_neighborhood_grade(demographics, walk, schools)
         assert isinstance(grade, NeighborhoodGrade)
         assert Decimal("0") <= score <= Decimal("100")
+
+    def test_crime_affects_grade(self):
+        """High crime rate reduces the score."""
+        demographics = NeighborhoodDemographics(
+            median_household_income=80_000,
+            poverty_rate=Decimal("0.08"),
+            renter_pct=Decimal("0.45"),
+        )
+        walk = WalkScoreResult(walk_score=55)
+        schools = [SchoolInfo(name="S1", rating=7, level="elementary", distance_miles=Decimal("0.8"))]
+
+        # Low crime
+        _, score_low_crime = compute_neighborhood_grade(
+            demographics, walk, schools, crime_rate=Decimal("800"),
+        )
+        # High crime
+        _, score_high_crime = compute_neighborhood_grade(
+            demographics, walk, schools, crime_rate=Decimal("4000"),
+        )
+        assert score_low_crime > score_high_crime
+
+    def test_hazard_penalties(self):
+        """Flood zone + earthquake + hurricane reduces hazard score."""
+        _, score_safe = compute_neighborhood_grade(None, None, [])
+        _, score_hazardous = compute_neighborhood_grade(
+            None, None, [],
+            flood_zone="AE",
+            seismic_pga=Decimal("0.5"),
+            wildfire_risk=5,
+            hurricane_zone=3,
+            hail_frequency="high",
+        )
+        # Hazardous area gets lower score
+        assert score_safe > score_hazardous
+
+    def test_hazard_score_floor_at_zero(self):
+        """Hazard score should not go below 0 even with many penalties."""
+        _, score = compute_neighborhood_grade(
+            None, None, [],
+            flood_zone="VE",
+            seismic_pga=Decimal("0.5"),
+            wildfire_risk=5,
+            hurricane_zone=3,
+            hail_frequency="high",
+        )
+        # Score should still be positive (other neutral dimensions)
+        assert score >= Decimal("0")

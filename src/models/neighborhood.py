@@ -46,3 +46,13 @@ class NeighborhoodReport:
     schools: list[SchoolInfo] = field(default_factory=list)
     avg_school_rating: Decimal | None = None
     ai_narrative: str | None = None
+
+    # Hazard data (populated by extended resolver)
+    flood_zone: str | None = None
+    seismic_pga: Decimal | None = None
+    wildfire_risk: int | None = None
+    hurricane_zone: int | None = None
+    hail_frequency: str | None = None
+    crime_rate: Decimal | None = None
+    climate_zone: str | None = None
+    traffic_noise_score: int | None = None

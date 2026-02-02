@@ -17,16 +17,19 @@ from src.api.schemas import (
     DemographicsResponse,
     WalkScoreResponse,
     SchoolResponse,
+    AssumptionDetailResponse,
+    AssumptionManifestResponse,
 )
 from src.api.deps import get_resolver
 from src.data.resolver import PropertyResolver
 from src.models.assumptions import DealAssumptions, CostSegAllocation
 from src.models.investor import InvestorTaxProfile, FilingStatus
 from src.models.neighborhood import NeighborhoodReport
+from src.models.smart_assumptions import UserOverrides, AssumptionManifest
 from src.models.rehab import ConditionGrade
 from src.engine.proforma import run_proforma
 from src.engine.rehab import estimate_rehab_budget
-from src.engine.insurance import estimate_annual_insurance
+from src.engine.assumptions_builder import build_smart_assumptions
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 
@@ -41,6 +44,47 @@ def _build_investor(req: AnalyzeRequest) -> InvestorTaxProfile:
         state=req.state or "CA",
         is_re_professional=req.is_re_professional,
     )
+
+
+def _build_overrides(req: AnalyzeRequest) -> UserOverrides:
+    """Extract user overrides from request."""
+    return UserOverrides(
+        purchase_price=req.purchase_price_override,
+        ltv=req.ltv,
+        interest_rate=req.interest_rate,
+        loan_term_years=req.loan_term_years,
+        loan_type=req.loan_type,
+        monthly_rent=req.monthly_rent,
+        annual_rent_growth=req.annual_rent_growth,
+        vacancy_rate=req.vacancy_rate,
+        property_tax=req.property_tax,
+        insurance=req.insurance,
+        maintenance_pct=req.maintenance_pct,
+        management_pct=req.management_pct,
+        capex_reserve_pct=req.capex_reserve_pct,
+        hoa=req.hoa,
+        annual_appreciation=req.annual_appreciation,
+        land_value_pct=req.land_value_pct,
+        annual_expense_growth=req.annual_expense_growth,
+        hold_years=req.hold_years,
+        selling_costs_pct=req.selling_costs_pct,
+        closing_cost_pct=req.closing_cost_pct,
+    )
+
+
+def _manifest_to_response(manifest: AssumptionManifest) -> AssumptionManifestResponse:
+    """Convert engine AssumptionManifest to API response."""
+    details = {}
+    for key, d in manifest.details.items():
+        details[key] = AssumptionDetailResponse(
+            field_name=d.field_name,
+            value=d.value,
+            source=d.source.value,
+            confidence=d.confidence.value,
+            justification=d.justification,
+            data_points=d.data_points,
+        )
+    return AssumptionManifestResponse(details=details)
 
 
 def _neighborhood_to_response(report: NeighborhoodReport) -> NeighborhoodReportResponse:
@@ -83,11 +127,20 @@ def _neighborhood_to_response(report: NeighborhoodReport) -> NeighborhoodReportR
         schools=schools_resp,
         avg_school_rating=report.avg_school_rating,
         ai_narrative=report.ai_narrative,
+        flood_zone=report.flood_zone,
+        seismic_pga=report.seismic_pga,
+        wildfire_risk=report.wildfire_risk,
+        hurricane_zone=report.hurricane_zone,
+        hail_frequency=report.hail_frequency,
+        crime_rate=report.crime_rate,
+        climate_zone=report.climate_zone,
+        traffic_noise_score=report.traffic_noise_score,
     )
 
 
 def _result_to_response(
-    result, prop_detail, rehab_budget=None, estimated_insurance=None, neighborhood_report=None,
+    result, prop_detail, rehab_budget=None, estimated_insurance=None,
+    neighborhood_report=None, loan_type=None, manifest=None,
 ) -> AnalysisResponse:
     """Convert engine AnalysisResult to API response."""
     yearly = [
@@ -166,6 +219,10 @@ def _result_to_response(
     if neighborhood_report is not None:
         neighborhood_resp = _neighborhood_to_response(neighborhood_report)
 
+    manifest_resp = None
+    if manifest is not None:
+        manifest_resp = _manifest_to_response(manifest)
+
     return AnalysisResponse(
         property=prop_resp,
         total_initial_investment=result.total_initial_investment,
@@ -185,6 +242,8 @@ def _result_to_response(
         disposition=disposition,
         estimated_insurance=estimated_insurance,
         neighborhood=neighborhood_resp,
+        loan_type=loan_type,
+        assumption_manifest=manifest_resp,
     )
 
 
@@ -195,39 +254,27 @@ async def analyze(
 ):
     """Primary endpoint: address string → full analysis.
 
-    Orchestrates: resolve property → build assumptions → run proforma → return results.
+    Orchestrates: resolve property → build smart assumptions → run proforma → return results.
     """
-    # Resolve property data + neighborhood intelligence
+    # Resolve property data + neighborhood + macro
     neighborhood_report = None
+    macro = None
     try:
-        prop, neighborhood_report = await resolver.resolve_with_neighborhood(req.address)
+        prop, neighborhood_report, macro = await resolver.resolve_full(req.address)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # Build investor profile
     investor = _build_investor(req)
 
-    # Determine purchase price: override > estimated value > last sale
-    purchase_price = req.purchase_price_override or prop.estimated_value or prop.last_sale_price
-    if not purchase_price:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not determine property value. Please provide purchase_price_override.",
-        )
-
-    # Estimate insurance
-    insurance_estimate = estimate_annual_insurance(
-        property_value=purchase_price,
-        sqft=prop.sqft or 1500,
-        year_built=prop.year_built or 2000,
-        state=prop.address.state or "OH",
-        property_type=prop.property_type,
-    )
+    # Build overrides from request
+    overrides = _build_overrides(req)
 
     # Build rehab budget if condition grade provided
     rehab_budget = None
-    if req.condition_grade:
-        grade = ConditionGrade(req.condition_grade)
+    condition_grade = req.condition_grade or "turnkey"
+    if condition_grade != "turnkey":
+        grade = ConditionGrade(condition_grade)
         rehab_budget = estimate_rehab_budget(
             sqft=prop.sqft or 1500,
             year_built=prop.year_built or 2000,
@@ -237,24 +284,29 @@ async def analyze(
             total_override=req.rehab_total_override,
         )
 
-    assumptions_kwargs = dict(
-        purchase_price=purchase_price,
-        monthly_rent=prop.estimated_rent or Decimal("0"),
-        property_tax=prop.annual_tax or Decimal("0"),
-        insurance=insurance_estimate,
-    )
-    if rehab_budget is not None:
-        assumptions_kwargs["rehab_budget"] = rehab_budget
-
-    assumptions = DealAssumptions(**assumptions_kwargs)
+    # Build smart assumptions with manifest
+    try:
+        assumptions, manifest = build_smart_assumptions(
+            prop=prop,
+            neighborhood=neighborhood_report,
+            macro=macro,
+            overrides=overrides,
+            condition_grade=condition_grade,
+            rehab_budget=rehab_budget,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Run proforma
     result = run_proforma(assumptions, investor)
+
     return _result_to_response(
         result, prop,
         rehab_budget=rehab_budget,
-        estimated_insurance=insurance_estimate,
+        estimated_insurance=assumptions.insurance,
         neighborhood_report=neighborhood_report,
+        loan_type=assumptions.loan_type,
+        manifest=manifest,
     )
 
 

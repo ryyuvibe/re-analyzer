@@ -43,6 +43,15 @@ class RentCastClient:
         # RentCast returns a list; take first match
         prop = data[0] if isinstance(data, list) else data
 
+        # Parse image URL if available
+        image_url = prop.get("imageUrl") or None
+        if not image_url:
+            photos = prop.get("photos")
+            if isinstance(photos, list) and photos:
+                image_url = photos[0] if isinstance(photos[0], str) else photos[0].get("url")
+
+        logger.debug("RentCast raw property keys: %s", list(prop.keys()))
+
         return PropertyDetail(
             address=address,
             bedrooms=prop.get("bedrooms", 0),
@@ -54,6 +63,7 @@ class RentCastClient:
             assessed_value=Decimal(str(prop.get("assessedValue", 0))),
             annual_tax=Decimal(str(prop.get("taxAmount", 0))),
             last_sale_price=Decimal(str(prop.get("lastSalePrice", 0))),
+            image_url=image_url,
         )
 
     async def get_rent_estimate(self, address: Address) -> Decimal | None:

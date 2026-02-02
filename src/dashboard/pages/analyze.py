@@ -1,4 +1,11 @@
-"""Main analysis page — manual entry + address lookup with Go/No-Go scorecard."""
+"""Main analysis page — manual entry + address lookup with Go/No-Go scorecard.
+
+Features:
+  - Assumption tooltips with confidence badges
+  - Loan type selector (conventional / DSCR)
+  - Override any assumption inline
+  - Neighborhood intelligence panel with hazard data
+"""
 
 import dash
 from dash import html, dcc, callback, Input, Output, State, no_update
@@ -9,9 +16,12 @@ from decimal import Decimal
 from src.engine.proforma import run_proforma
 from src.engine.rehab import estimate_rehab_budget
 from src.engine.insurance import estimate_annual_insurance
+from src.engine.assumptions_builder import build_smart_assumptions
 from src.models.assumptions import DealAssumptions
+from src.models.property import PropertyDetail, Address
 from src.models.investor import InvestorTaxProfile, FilingStatus
 from src.models.rehab import ConditionGrade
+from src.models.smart_assumptions import MacroContext, UserOverrides
 
 dash.register_page(__name__, path="/", name="Analyze")
 
@@ -36,6 +46,18 @@ BTN_STYLE = {
 }
 
 FIELD_STYLE = {"width": "100%", "padding": "0.5rem", "fontSize": "0.95rem"}
+
+CONFIDENCE_COLORS = {
+    "high": "#2ecc71",
+    "medium": "#f39c12",
+    "low": "#e94560",
+}
+
+CONFIDENCE_LABELS = {
+    "high": "High",
+    "medium": "Med",
+    "low": "Low",
+}
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -89,22 +111,54 @@ layout = html.Div([
 
     # --- Address Lookup Section ---
     html.Div(id="address-section", children=[
-        html.P("Enter any US address to get a complete investment analysis."),
+        html.P("Enter any US address to get a complete investment analysis with smart assumptions."),
         html.Div([
             dcc.Input(
                 id="address-input",
                 type="text",
                 placeholder="123 Main St, Columbus, OH 43215",
-                style={"width": "50%", "padding": "0.75rem", "fontSize": "1rem"},
+                style={"width": "40%", "padding": "0.75rem", "fontSize": "1rem"},
             ),
             dcc.Input(
                 id="purchase-price-override",
                 type="number",
                 placeholder="Purchase price override ($)",
-                style={"width": "25%", "padding": "0.75rem", "fontSize": "1rem"},
+                style={"width": "20%", "padding": "0.75rem", "fontSize": "1rem"},
             ),
+            html.Div([
+                html.Label("Loan Type", style={"fontSize": "0.85rem"}),
+                dcc.Dropdown(
+                    id="loan-type-select",
+                    options=[
+                        {"label": "Conventional", "value": "conventional"},
+                        {"label": "DSCR", "value": "dscr"},
+                    ],
+                    value="conventional",
+                    clearable=False,
+                    style={"width": "160px"},
+                ),
+            ]),
             html.Button("Analyze", id="analyze-btn", n_clicks=0, style=BTN_STYLE),
-        ], style={"display": "flex", "gap": "0.5rem"}),
+        ], style={"display": "flex", "gap": "0.5rem", "alignItems": "end"}),
+
+        # Override fields (collapsible)
+        html.Details([
+            html.Summary("Override Assumptions", style={"cursor": "pointer", "fontWeight": "bold", "marginTop": "1rem"}),
+            html.Div([
+                html.Div([
+                    _field("Interest Rate (%)", dcc.Input(id="ovr-rate", type="number", placeholder="auto", step=0.01, style=FIELD_STYLE)),
+                    _field("LTV (%)", dcc.Input(id="ovr-ltv", type="number", placeholder="auto", step=1, style=FIELD_STYLE)),
+                    _field("Monthly Rent ($)", dcc.Input(id="ovr-rent", type="number", placeholder="auto", style=FIELD_STYLE)),
+                    _field("Vacancy (%)", dcc.Input(id="ovr-vacancy", type="number", placeholder="auto", step=0.5, style=FIELD_STYLE)),
+                ], style={"display": "flex", "gap": "1rem", "marginBottom": "0.75rem"}),
+                html.Div([
+                    _field("Appreciation (%)", dcc.Input(id="ovr-appreciation", type="number", placeholder="auto", step=0.1, style=FIELD_STYLE)),
+                    _field("Hold Years", dcc.Input(id="ovr-hold", type="number", placeholder="7", style=FIELD_STYLE)),
+                    _field("Management (%)", dcc.Input(id="ovr-mgmt", type="number", placeholder="auto", step=0.5, style=FIELD_STYLE)),
+                    _field("Maintenance (%)", dcc.Input(id="ovr-maint", type="number", placeholder="auto", step=0.5, style=FIELD_STYLE)),
+                ], style={"display": "flex", "gap": "1rem"}),
+            ], style={"marginTop": "0.75rem"}),
+        ], style={"marginTop": "0.5rem"}),
     ], style={"display": "none", "marginBottom": "1.5rem"}),
 
     # --- Rehab Section (shared) ---
@@ -213,6 +267,15 @@ def toggle_input_mode(mode):
         State("fed-rate", "value"),
         State("state-rate", "value"),
         State("input-mode", "value"),
+        State("loan-type-select", "value"),
+        State("ovr-rate", "value"),
+        State("ovr-ltv", "value"),
+        State("ovr-rent", "value"),
+        State("ovr-vacancy", "value"),
+        State("ovr-appreciation", "value"),
+        State("ovr-hold", "value"),
+        State("ovr-mgmt", "value"),
+        State("ovr-maint", "value"),
     ],
     prevent_initial_call=True,
 )
@@ -222,13 +285,17 @@ def run_analysis(
     price, rent, sqft, year_built, prop_tax, insurance, beds, baths, manual_address,
     condition_grade, rehab_months,
     filing_status, agi, fed_rate, state_rate,
-    input_mode,
+    input_mode, loan_type,
+    ovr_rate, ovr_ltv, ovr_rent, ovr_vacancy,
+    ovr_appreciation, ovr_hold, ovr_mgmt, ovr_maint,
 ):
     triggered = dash.ctx.triggered_id
     if triggered == "analyze-btn":
         return _run_address_mode(
             address, purchase_price_override, condition_grade, rehab_months,
-            filing_status, agi, fed_rate, state_rate,
+            filing_status, agi, fed_rate, state_rate, loan_type,
+            ovr_rate, ovr_ltv, ovr_rent, ovr_vacancy,
+            ovr_appreciation, ovr_hold, ovr_mgmt, ovr_maint,
         )
     elif triggered == "manual-analyze-btn":
         return _run_manual_mode(
@@ -245,7 +312,9 @@ def run_analysis(
 
 
 def _run_address_mode(address, purchase_price_override, condition_grade, rehab_months,
-                      filing_status, agi, fed_rate, state_rate):
+                      filing_status, agi, fed_rate, state_rate, loan_type,
+                      ovr_rate, ovr_ltv, ovr_rent, ovr_vacancy,
+                      ovr_appreciation, ovr_hold, ovr_mgmt, ovr_maint):
     if not address:
         return no_update, no_update
     try:
@@ -258,10 +327,31 @@ def _run_address_mode(address, purchase_price_override, condition_grade, rehab_m
         }
         if purchase_price_override:
             payload["purchase_price_override"] = float(purchase_price_override)
+        if loan_type:
+            payload["loan_type"] = loan_type
         if condition_grade and condition_grade != "turnkey":
             payload["condition_grade"] = condition_grade
         if rehab_months:
             payload["rehab_months"] = int(rehab_months)
+
+        # Overrides
+        if ovr_rate:
+            payload["interest_rate"] = float(ovr_rate) / 100
+        if ovr_ltv:
+            payload["ltv"] = float(ovr_ltv) / 100
+        if ovr_rent:
+            payload["monthly_rent"] = float(ovr_rent)
+        if ovr_vacancy:
+            payload["vacancy_rate"] = float(ovr_vacancy) / 100
+        if ovr_appreciation:
+            payload["annual_appreciation"] = float(ovr_appreciation) / 100
+        if ovr_hold:
+            payload["hold_years"] = int(ovr_hold)
+        if ovr_mgmt:
+            payload["management_pct"] = float(ovr_mgmt) / 100
+        if ovr_maint:
+            payload["maintenance_pct"] = float(ovr_maint) / 100
+
         resp = httpx.post(f"{API_BASE}/api/v1/analyze", json=payload, timeout=60.0)
         resp.raise_for_status()
         data = resp.json()
@@ -269,6 +359,8 @@ def _run_address_mode(address, purchase_price_override, condition_grade, rehab_m
         return html.Div(f"Error: {e}", style={"color": "red"}), ""
 
     children = [_build_scorecard(data), _build_results(data)]
+    if data.get("assumption_manifest"):
+        children.insert(1, _build_assumption_panel(data["assumption_manifest"]))
     if data.get("neighborhood"):
         children.append(_build_neighborhood_report(data["neighborhood"]))
     return html.Div(children), ""
@@ -406,6 +498,110 @@ def _result_to_display_dict(result, address, beds, baths, sqft, year_built,
 
 
 # ---------------------------------------------------------------------------
+# Assumption Panel with Tooltips and Confidence Badges
+# ---------------------------------------------------------------------------
+
+
+def _confidence_badge(confidence):
+    """Render a small colored badge showing confidence level."""
+    color = CONFIDENCE_COLORS.get(confidence, "#999")
+    label = CONFIDENCE_LABELS.get(confidence, "?")
+    return html.Span(label, style={
+        "backgroundColor": color,
+        "color": "white",
+        "fontSize": "0.7rem",
+        "fontWeight": "bold",
+        "padding": "2px 6px",
+        "borderRadius": "4px",
+        "marginLeft": "0.5rem",
+        "verticalAlign": "middle",
+    })
+
+
+def _assumption_row(field_name, detail):
+    """Render a single assumption row with value, source, and tooltip."""
+    value = float(detail.get("value", 0))
+    source = detail.get("source", "default")
+    confidence = detail.get("confidence", "low")
+    justification = detail.get("justification", "")
+
+    # Format value based on field type
+    if "pct" in field_name or field_name in ("ltv", "interest_rate", "vacancy_rate",
+                                              "annual_rent_growth", "annual_appreciation",
+                                              "annual_expense_growth", "selling_costs_pct"):
+        display_val = f"{value * 100:.2f}%"
+    elif field_name in ("purchase_price", "monthly_rent", "property_tax", "insurance",
+                        "hoa", "closing_costs"):
+        display_val = f"${value:,.0f}"
+    elif field_name in ("hold_years", "loan_term_years"):
+        display_val = f"{int(value)} yr"
+    else:
+        display_val = str(value)
+
+    # Nice field label
+    label = field_name.replace("_", " ").title()
+
+    # Source icon
+    source_icon = {"api_fetched": "API", "estimated": "Est", "user_override": "User", "default": "Def"}
+    source_label = source_icon.get(source, "?")
+
+    return html.Div([
+        html.Div([
+            html.Span(label, style={"fontWeight": "bold", "fontSize": "0.85rem"}),
+            _confidence_badge(confidence),
+        ], style={"display": "flex", "alignItems": "center"}),
+        html.Div([
+            html.Span(display_val, style={"fontSize": "1rem", "fontWeight": "bold"}),
+            html.Span(f" ({source_label})", style={"fontSize": "0.75rem", "color": "#888"}),
+        ]),
+        html.Div(justification, style={
+            "fontSize": "0.75rem", "color": "#666", "lineHeight": "1.3",
+            "marginTop": "2px",
+        }),
+    ], style={
+        "padding": "0.5rem 0.75rem",
+        "borderBottom": "1px solid #eee",
+    }, title=justification)
+
+
+def _build_assumption_panel(manifest_data):
+    """Build the assumption manifest panel with tooltips and confidence badges."""
+    if not manifest_data:
+        return html.Div()
+
+    details = manifest_data.get("details", {})
+
+    # Group assumptions
+    key_fields = [
+        "purchase_price", "monthly_rent", "interest_rate", "ltv",
+        "vacancy_rate", "property_tax", "insurance", "maintenance_pct",
+        "management_pct", "annual_appreciation", "annual_rent_growth",
+        "annual_expense_growth", "closing_costs", "hold_years",
+        "selling_costs_pct", "capex_reserve_pct", "hoa", "land_value_pct",
+    ]
+
+    rows = []
+    for field in key_fields:
+        if field in details:
+            rows.append(_assumption_row(field, details[field]))
+
+    return html.Div([
+        html.H3("Smart Assumptions", style={"marginBottom": "0.5rem"}),
+        html.P("Each assumption is estimated from data. Hover for details.",
+               style={"fontSize": "0.85rem", "color": "#666", "marginBottom": "0.75rem"}),
+        html.Div(rows, style={
+            "display": "grid",
+            "gridTemplateColumns": "1fr 1fr 1fr",
+            "gap": "0",
+            "backgroundColor": "white",
+            "border": "1px solid #ddd",
+            "borderRadius": "8px",
+            "overflow": "hidden",
+        }),
+    ], style={"marginBottom": "2rem"})
+
+
+# ---------------------------------------------------------------------------
 # Scorecard
 # ---------------------------------------------------------------------------
 
@@ -464,10 +660,24 @@ def _build_scorecard(data):
         verdict, verdict_color = "DIG DEEPER", "#f39c12"
         verdict_text = "Mixed signals. Worth a closer look before committing."
 
+    # Loan type indicator
+    loan_type = data.get("loan_type")
+    loan_badge = None
+    if loan_type:
+        loan_badge = html.Span(loan_type.upper(), style={
+            "backgroundColor": "#1a1a2e", "color": "white",
+            "padding": "4px 10px", "borderRadius": "4px",
+            "fontSize": "0.8rem", "fontWeight": "bold",
+            "marginLeft": "1rem",
+        })
+
     verdict_banner = html.Div([
-        html.Div(verdict, style={
-            "fontSize": "2rem", "fontWeight": "bold", "color": verdict_color,
-        }),
+        html.Div([
+            html.Span(verdict, style={
+                "fontSize": "2rem", "fontWeight": "bold", "color": verdict_color,
+            }),
+            loan_badge,
+        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center"}),
         html.Div(verdict_text, style={"fontSize": "0.95rem", "color": "#666"}),
     ], style={
         "textAlign": "center", "padding": "1rem",
@@ -484,7 +694,7 @@ def _build_scorecard(data):
 
 
 # ---------------------------------------------------------------------------
-# Detailed results (unchanged logic, minor property field guards)
+# Detailed results
 # ---------------------------------------------------------------------------
 
 
@@ -504,7 +714,7 @@ def _build_results(data):
         _metric_card("Net Tax Impact", f"${float(data['net_tax_impact']):,.0f}"),
     ], style={"display": "flex", "gap": "1rem", "marginBottom": "2rem", "flexWrap": "wrap"})
 
-    # Property summary — guard for empty fields in manual mode
+    # Property summary
     addr_parts = [prop.get("street", "")]
     if prop.get("city"):
         addr_parts.append(prop["city"])
@@ -529,7 +739,7 @@ def _build_results(data):
         html.P(f"Value: ${float(prop.get('estimated_value', 0)):,.0f} · Rent: ${float(prop.get('estimated_rent', 0)):,.0f}/mo"),
     ], style={"backgroundColor": "#f5f5f5", "padding": "1rem", "borderRadius": "8px", "marginBottom": "2rem"})
 
-    # Rehab info (if applicable)
+    # Rehab info
     rehab_info = None
     rehab_cost = float(data.get("rehab_total_cost", 0))
     rehab_mo = data.get("rehab_months", 0)
@@ -676,6 +886,20 @@ def _score_bar(label, value, max_val=100):
     ], style={"display": "flex", "alignItems": "center", "marginBottom": "0.5rem"})
 
 
+def _hazard_item(label, value, risk_level="low"):
+    """Render a single hazard data point."""
+    if value is None:
+        return None
+    colors = {"low": "#2ecc71", "moderate": "#f39c12", "high": "#e94560"}
+    color = colors.get(risk_level, "#999")
+    return html.Div([
+        html.Span(label, style={"fontSize": "0.85rem", "color": "#666", "width": "140px", "display": "inline-block"}),
+        html.Span(str(value), style={
+            "fontSize": "0.85rem", "fontWeight": "bold", "color": color,
+        }),
+    ], style={"marginBottom": "0.3rem"})
+
+
 def _build_neighborhood_report(neighborhood):
     """Build the neighborhood intelligence panel from API response data."""
     grade = neighborhood.get("grade", "C")
@@ -726,6 +950,56 @@ def _build_neighborhood_report(neighborhood):
             _score_bar("Walk", ws.get("walk_score")),
             _score_bar("Transit", ws.get("transit_score")),
             _score_bar("Bike", ws.get("bike_score")),
+        ], style={"marginBottom": "1rem"}))
+
+    # Hazard / Risk data
+    hazard_items = []
+    flood = neighborhood.get("flood_zone")
+    if flood:
+        risk = "high" if flood in ("V", "VE", "A", "AE") else "moderate" if flood == "X500" else "low"
+        hazard_items.append(_hazard_item("Flood Zone", flood, risk))
+
+    seismic = neighborhood.get("seismic_pga")
+    if seismic is not None:
+        pga = float(seismic)
+        risk = "high" if pga >= 0.4 else "moderate" if pga >= 0.2 else "low"
+        hazard_items.append(_hazard_item("Seismic PGA", f"{pga:.2f}g", risk))
+
+    wildfire = neighborhood.get("wildfire_risk")
+    if wildfire is not None:
+        risk = "high" if wildfire >= 4 else "moderate" if wildfire >= 3 else "low"
+        hazard_items.append(_hazard_item("Wildfire Risk", f"Class {wildfire}/5", risk))
+
+    hurricane = neighborhood.get("hurricane_zone")
+    if hurricane is not None and hurricane > 0:
+        risk = "high" if hurricane >= 3 else "moderate"
+        hazard_items.append(_hazard_item("Hurricane Zone", f"Cat {hurricane}", risk))
+
+    hail = neighborhood.get("hail_frequency")
+    if hail and hail != "low":
+        risk = "high" if hail == "high" else "moderate"
+        hazard_items.append(_hazard_item("Hail Frequency", hail.title(), risk))
+
+    crime = neighborhood.get("crime_rate")
+    if crime is not None:
+        rate = float(crime)
+        risk = "high" if rate > 3000 else "moderate" if rate > 2000 else "low"
+        hazard_items.append(_hazard_item("Property Crime", f"{rate:,.0f}/100K", risk))
+
+    climate = neighborhood.get("climate_zone")
+    if climate:
+        hazard_items.append(_hazard_item("Climate Zone", climate.replace("_", " ").title(), "low"))
+
+    noise = neighborhood.get("traffic_noise_score")
+    if noise is not None and noise > 0:
+        risk = "high" if noise >= 7 else "moderate" if noise >= 4 else "low"
+        hazard_items.append(_hazard_item("Traffic/Noise", f"{noise}/10", risk))
+
+    hazard_items = [h for h in hazard_items if h is not None]
+    if hazard_items:
+        sections.append(html.Div([
+            html.H4("Risk & Environment", style={"marginBottom": "0.5rem"}),
+            html.Div(hazard_items),
         ], style={"marginBottom": "1rem"}))
 
     # Schools

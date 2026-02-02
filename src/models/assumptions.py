@@ -33,6 +33,7 @@ class DealAssumptions:
     interest_rate: Decimal = Decimal("0.07")  # Annual
     loan_term_years: int = 30
     loan_points: Decimal = Decimal("0")  # Points paid at closing
+    loan_type: str = "conventional"  # "conventional" or "dscr"
 
     # Income
     monthly_rent: Decimal = Decimal("0")

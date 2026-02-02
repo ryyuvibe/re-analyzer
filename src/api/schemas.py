@@ -29,6 +29,27 @@ class AnalyzeRequest(BaseModel):
     rehab_line_item_overrides: dict[str, Decimal] | None = None
     rehab_total_override: Decimal | None = None
 
+    # Smart assumption overrides
+    loan_type: str | None = None  # "conventional" or "dscr"
+    ltv: Decimal | None = None
+    interest_rate: Decimal | None = None
+    loan_term_years: int | None = None
+    monthly_rent: Decimal | None = None
+    annual_rent_growth: Decimal | None = None
+    vacancy_rate: Decimal | None = None
+    property_tax: Decimal | None = None
+    insurance: Decimal | None = None
+    maintenance_pct: Decimal | None = None
+    management_pct: Decimal | None = None
+    capex_reserve_pct: Decimal | None = None
+    hoa: Decimal | None = None
+    annual_appreciation: Decimal | None = None
+    land_value_pct: Decimal | None = None
+    annual_expense_growth: Decimal | None = None
+    hold_years: int | None = None
+    selling_costs_pct: Decimal | None = None
+    closing_cost_pct: Decimal | None = None
+
 
 class RerunRequest(BaseModel):
     """Re-run analysis with adjusted assumptions (no re-fetch of property data)."""
@@ -159,6 +180,27 @@ class NeighborhoodReportResponse(BaseModel):
     schools: list[SchoolResponse] = []
     avg_school_rating: Decimal | None = None
     ai_narrative: str | None = None
+    flood_zone: str | None = None
+    seismic_pga: Decimal | None = None
+    wildfire_risk: int | None = None
+    hurricane_zone: int | None = None
+    hail_frequency: str | None = None
+    crime_rate: Decimal | None = None
+    climate_zone: str | None = None
+    traffic_noise_score: int | None = None
+
+
+class AssumptionDetailResponse(BaseModel):
+    field_name: str
+    value: Decimal
+    source: str
+    confidence: str
+    justification: str
+    data_points: dict = {}
+
+
+class AssumptionManifestResponse(BaseModel):
+    details: dict[str, AssumptionDetailResponse] = {}
 
 
 class AnalysisResponse(BaseModel):
@@ -181,6 +223,8 @@ class AnalysisResponse(BaseModel):
     disposition: DispositionResponse
     estimated_insurance: Decimal | None = None
     neighborhood: NeighborhoodReportResponse | None = None
+    loan_type: str | None = None
+    assumption_manifest: AssumptionManifestResponse | None = None
 
 
 class ComparisonResponse(BaseModel):

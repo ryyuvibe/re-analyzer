@@ -1,6 +1,7 @@
 """FRED API client for macro economic indicators."""
 
 import logging
+import math
 from decimal import Decimal
 from datetime import date, timedelta
 
@@ -112,3 +113,40 @@ class FREDClient:
             for obs in data.get("observations", [])
             if obs.get("value", ".") != "."
         ]
+
+    async def get_cpi_5yr_cagr(self) -> Decimal | None:
+        """Compute CPI compound annual growth rate over the last 5 years.
+
+        Uses CPIAUCSL (Consumer Price Index for All Urban Consumers).
+        Returns as decimal (e.g. 0.035 for 3.5%).
+        """
+        end = date.today()
+        start = date(end.year - 5, end.month, 1)
+        series = await self.get_series(SERIES["cpi"], start_date=start, end_date=end)
+
+        if len(series) < 2:
+            return None
+
+        first_val = float(series[0]["value"])
+        last_val = float(series[-1]["value"])
+
+        if first_val <= 0:
+            return None
+
+        # Number of years between first and last observation
+        first_date = date.fromisoformat(series[0]["date"])
+        last_date = date.fromisoformat(series[-1]["date"])
+        years = (last_date - first_date).days / 365.25
+
+        if years <= 0:
+            return None
+
+        cagr = math.pow(last_val / first_val, 1 / years) - 1
+        return Decimal(str(round(cagr, 4)))
+
+    async def get_median_home_price(self) -> Decimal | None:
+        """Get the latest national median home sale price (MSPUS series).
+
+        Returns in dollars.
+        """
+        return await self._get_latest(SERIES["median_home_price"])

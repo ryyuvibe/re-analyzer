@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     rentcast_api_key: str = ""
     fred_api_key: str = ""
     census_api_key: str = ""
+    walkscore_api_key: str = ""
+    greatschools_api_key: str = ""
+    anthropic_api_key: str = ""
 
     # App
     secret_key: str = "change-me-in-production"

@@ -12,6 +12,9 @@ class Address:
     county: str = ""
     latitude: Decimal = Decimal("0")
     longitude: Decimal = Decimal("0")
+    state_fips: str = ""
+    county_fips: str = ""
+    tract_fips: str = ""
 
     @property
     def full(self) -> str:

@@ -13,14 +13,20 @@ from src.api.schemas import (
     DispositionResponse,
     PropertyResponse,
     RehabLineItemResponse,
+    NeighborhoodReportResponse,
+    DemographicsResponse,
+    WalkScoreResponse,
+    SchoolResponse,
 )
 from src.api.deps import get_resolver
 from src.data.resolver import PropertyResolver
 from src.models.assumptions import DealAssumptions, CostSegAllocation
 from src.models.investor import InvestorTaxProfile, FilingStatus
+from src.models.neighborhood import NeighborhoodReport
 from src.models.rehab import ConditionGrade
 from src.engine.proforma import run_proforma
 from src.engine.rehab import estimate_rehab_budget
+from src.engine.insurance import estimate_annual_insurance
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 
@@ -37,7 +43,52 @@ def _build_investor(req: AnalyzeRequest) -> InvestorTaxProfile:
     )
 
 
-def _result_to_response(result, prop_detail, rehab_budget=None) -> AnalysisResponse:
+def _neighborhood_to_response(report: NeighborhoodReport) -> NeighborhoodReportResponse:
+    """Convert engine NeighborhoodReport to API response."""
+    demographics_resp = None
+    if report.demographics:
+        d = report.demographics
+        demographics_resp = DemographicsResponse(
+            median_household_income=d.median_household_income,
+            median_home_value=d.median_home_value,
+            poverty_rate=d.poverty_rate,
+            population=d.population,
+            renter_pct=d.renter_pct,
+        )
+
+    walk_resp = None
+    if report.walk_score:
+        w = report.walk_score
+        walk_resp = WalkScoreResponse(
+            walk_score=w.walk_score,
+            transit_score=w.transit_score,
+            bike_score=w.bike_score,
+        )
+
+    schools_resp = [
+        SchoolResponse(
+            name=s.name,
+            rating=s.rating,
+            level=s.level,
+            distance_miles=s.distance_miles,
+        )
+        for s in report.schools
+    ]
+
+    return NeighborhoodReportResponse(
+        grade=report.grade.value,
+        grade_score=report.grade_score,
+        demographics=demographics_resp,
+        walk_score=walk_resp,
+        schools=schools_resp,
+        avg_school_rating=report.avg_school_rating,
+        ai_narrative=report.ai_narrative,
+    )
+
+
+def _result_to_response(
+    result, prop_detail, rehab_budget=None, estimated_insurance=None, neighborhood_report=None,
+) -> AnalysisResponse:
     """Convert engine AnalysisResult to API response."""
     yearly = [
         YearlyProjectionResponse(
@@ -111,6 +162,10 @@ def _result_to_response(result, prop_detail, rehab_budget=None) -> AnalysisRespo
             for item in rehab_budget.line_items
         ]
 
+    neighborhood_resp = None
+    if neighborhood_report is not None:
+        neighborhood_resp = _neighborhood_to_response(neighborhood_report)
+
     return AnalysisResponse(
         property=prop_resp,
         total_initial_investment=result.total_initial_investment,
@@ -128,6 +183,8 @@ def _result_to_response(result, prop_detail, rehab_budget=None) -> AnalysisRespo
         rehab_line_items=rehab_line_items,
         yearly_projections=yearly,
         disposition=disposition,
+        estimated_insurance=estimated_insurance,
+        neighborhood=neighborhood_resp,
     )
 
 
@@ -140,22 +197,32 @@ async def analyze(
 
     Orchestrates: resolve property → build assumptions → run proforma → return results.
     """
-    # Resolve property data
+    # Resolve property data + neighborhood intelligence
+    neighborhood_report = None
     try:
-        prop = await resolver.resolve(req.address)
+        prop, neighborhood_report = await resolver.resolve_with_neighborhood(req.address)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # Build investor profile
     investor = _build_investor(req)
 
-    # Build assumptions from resolved data
-    purchase_price = prop.estimated_value or prop.last_sale_price
+    # Determine purchase price: override > estimated value > last sale
+    purchase_price = req.purchase_price_override or prop.estimated_value or prop.last_sale_price
     if not purchase_price:
         raise HTTPException(
             status_code=400,
-            detail="Could not determine property value. Please provide purchase_price.",
+            detail="Could not determine property value. Please provide purchase_price_override.",
         )
+
+    # Estimate insurance
+    insurance_estimate = estimate_annual_insurance(
+        property_value=purchase_price,
+        sqft=prop.sqft or 1500,
+        year_built=prop.year_built or 2000,
+        state=prop.address.state or "OH",
+        property_type=prop.property_type,
+    )
 
     # Build rehab budget if condition grade provided
     rehab_budget = None
@@ -174,7 +241,7 @@ async def analyze(
         purchase_price=purchase_price,
         monthly_rent=prop.estimated_rent or Decimal("0"),
         property_tax=prop.annual_tax or Decimal("0"),
-        insurance=Decimal("1500"),  # Default estimate
+        insurance=insurance_estimate,
     )
     if rehab_budget is not None:
         assumptions_kwargs["rehab_budget"] = rehab_budget
@@ -183,7 +250,12 @@ async def analyze(
 
     # Run proforma
     result = run_proforma(assumptions, investor)
-    return _result_to_response(result, prop, rehab_budget=rehab_budget)
+    return _result_to_response(
+        result, prop,
+        rehab_budget=rehab_budget,
+        estimated_insurance=insurance_estimate,
+        neighborhood_report=neighborhood_report,
+    )
 
 
 @router.post("/analyze/rerun", response_model=AnalysisResponse)

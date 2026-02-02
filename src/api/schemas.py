@@ -20,6 +20,9 @@ class AnalyzeRequest(BaseModel):
     state: str | None = None
     is_re_professional: bool = False
 
+    # Purchase price override (address lookup mode)
+    purchase_price_override: Decimal | None = None
+
     # Rehab
     condition_grade: str | None = None
     rehab_months: int | None = None
@@ -127,6 +130,37 @@ class PropertyResponse(BaseModel):
     annual_tax: Decimal
 
 
+class DemographicsResponse(BaseModel):
+    median_household_income: int | None = None
+    median_home_value: int | None = None
+    poverty_rate: Decimal | None = None
+    population: int | None = None
+    renter_pct: Decimal | None = None
+
+
+class WalkScoreResponse(BaseModel):
+    walk_score: int | None = None
+    transit_score: int | None = None
+    bike_score: int | None = None
+
+
+class SchoolResponse(BaseModel):
+    name: str
+    rating: int
+    level: str
+    distance_miles: Decimal
+
+
+class NeighborhoodReportResponse(BaseModel):
+    grade: str
+    grade_score: Decimal
+    demographics: DemographicsResponse | None = None
+    walk_score: WalkScoreResponse | None = None
+    schools: list[SchoolResponse] = []
+    avg_school_rating: Decimal | None = None
+    ai_narrative: str | None = None
+
+
 class AnalysisResponse(BaseModel):
     id: UUID | None = None
     property: PropertyResponse
@@ -145,6 +179,8 @@ class AnalysisResponse(BaseModel):
     rehab_line_items: list[RehabLineItemResponse] = []
     yearly_projections: list[YearlyProjectionResponse]
     disposition: DispositionResponse
+    estimated_insurance: Decimal | None = None
+    neighborhood: NeighborhoodReportResponse | None = None
 
 
 class ComparisonResponse(BaseModel):

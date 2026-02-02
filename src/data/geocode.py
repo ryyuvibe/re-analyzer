@@ -42,6 +42,21 @@ async def geocode_address(raw_address: str) -> Address:
     counties = geographies.get("Counties", [])
     county_name = counties[0]["NAME"] if counties else ""
 
+    # Extract FIPS codes for census tract queries
+    state_fips = ""
+    county_fips = ""
+    tract_fips = ""
+    if counties:
+        state_fips = counties[0].get("STATE", "")
+        county_fips = counties[0].get("COUNTY", "")
+    tracts = geographies.get("Census Tracts", [])
+    if tracts:
+        tract_fips = tracts[0].get("TRACT", "")
+        if not state_fips:
+            state_fips = tracts[0].get("STATE", "")
+        if not county_fips:
+            county_fips = tracts[0].get("COUNTY", "")
+
     # Extract state from geographies or address components
     state = components.get("state", "")
     city = components.get("city", "")
@@ -59,4 +74,7 @@ async def geocode_address(raw_address: str) -> Address:
         county=county_name,
         latitude=Decimal(str(coords["y"])),
         longitude=Decimal(str(coords["x"])),
+        state_fips=state_fips,
+        county_fips=county_fips,
+        tract_fips=tract_fips,
     )

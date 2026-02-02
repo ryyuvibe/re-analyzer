@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from src.engine.proforma import run_proforma
 from src.engine.rehab import estimate_rehab_budget
+from src.engine.insurance import estimate_annual_insurance
 from src.models.assumptions import DealAssumptions
 from src.models.investor import InvestorTaxProfile, FilingStatus
 from src.models.rehab import ConditionGrade
@@ -94,7 +95,13 @@ layout = html.Div([
                 id="address-input",
                 type="text",
                 placeholder="123 Main St, Columbus, OH 43215",
-                style={"width": "60%", "padding": "0.75rem", "fontSize": "1rem"},
+                style={"width": "50%", "padding": "0.75rem", "fontSize": "1rem"},
+            ),
+            dcc.Input(
+                id="purchase-price-override",
+                type="number",
+                placeholder="Purchase price override ($)",
+                style={"width": "25%", "padding": "0.75rem", "fontSize": "1rem"},
             ),
             html.Button("Analyze", id="analyze-btn", n_clicks=0, style=BTN_STYLE),
         ], style={"display": "flex", "gap": "0.5rem"}),
@@ -189,6 +196,7 @@ def toggle_input_mode(mode):
     [Input("analyze-btn", "n_clicks"), Input("manual-analyze-btn", "n_clicks")],
     [
         State("address-input", "value"),
+        State("purchase-price-override", "value"),
         State("manual-price", "value"),
         State("manual-rent", "value"),
         State("manual-sqft", "value"),
@@ -210,7 +218,7 @@ def toggle_input_mode(mode):
 )
 def run_analysis(
     addr_clicks, manual_clicks,
-    address,
+    address, purchase_price_override,
     price, rent, sqft, year_built, prop_tax, insurance, beds, baths, manual_address,
     condition_grade, rehab_months,
     filing_status, agi, fed_rate, state_rate,
@@ -219,7 +227,7 @@ def run_analysis(
     triggered = dash.ctx.triggered_id
     if triggered == "analyze-btn":
         return _run_address_mode(
-            address, condition_grade, rehab_months,
+            address, purchase_price_override, condition_grade, rehab_months,
             filing_status, agi, fed_rate, state_rate,
         )
     elif triggered == "manual-analyze-btn":
@@ -236,7 +244,7 @@ def run_analysis(
 # ---------------------------------------------------------------------------
 
 
-def _run_address_mode(address, condition_grade, rehab_months,
+def _run_address_mode(address, purchase_price_override, condition_grade, rehab_months,
                       filing_status, agi, fed_rate, state_rate):
     if not address:
         return no_update, no_update
@@ -248,17 +256,22 @@ def _run_address_mode(address, condition_grade, rehab_months,
             "marginal_federal_rate": fed_rate / 100 if fed_rate else 0.37,
             "marginal_state_rate": state_rate / 100 if state_rate else 0.133,
         }
+        if purchase_price_override:
+            payload["purchase_price_override"] = float(purchase_price_override)
         if condition_grade and condition_grade != "turnkey":
             payload["condition_grade"] = condition_grade
         if rehab_months:
             payload["rehab_months"] = int(rehab_months)
-        resp = httpx.post(f"{API_BASE}/api/v1/analyze", json=payload, timeout=30.0)
+        resp = httpx.post(f"{API_BASE}/api/v1/analyze", json=payload, timeout=60.0)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         return html.Div(f"Error: {e}", style={"color": "red"}), ""
 
-    return html.Div([_build_scorecard(data), _build_results(data)]), ""
+    children = [_build_scorecard(data), _build_results(data)]
+    if data.get("neighborhood"):
+        children.append(_build_neighborhood_report(data["neighborhood"]))
+    return html.Div(children), ""
 
 
 def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
@@ -283,11 +296,22 @@ def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
             rehab_months=int(rehab_months) if rehab_months else None,
         )
 
+        # Auto-estimate insurance if not provided
+        if insurance:
+            insurance_val = Decimal(str(insurance))
+        else:
+            insurance_val = estimate_annual_insurance(
+                property_value=Decimal(str(price)),
+                sqft=sqft,
+                year_built=year_built,
+                state="OH",
+            )
+
         assumptions = DealAssumptions(
             purchase_price=Decimal(str(price)),
             monthly_rent=Decimal(str(rent)),
             property_tax=Decimal(str(prop_tax or 0)),
-            insurance=Decimal(str(insurance or 1200)),
+            insurance=insurance_val,
             rehab_budget=rehab_budget,
         )
 
@@ -618,3 +642,127 @@ def _metric_card(label, value):
         "minWidth": "150px",
         "textAlign": "center",
     })
+
+
+# ---------------------------------------------------------------------------
+# Neighborhood Report
+# ---------------------------------------------------------------------------
+
+GRADE_COLORS = {
+    "A": "#2ecc71",
+    "B": "#27ae60",
+    "C": "#f39c12",
+    "D": "#e67e22",
+    "F": "#e94560",
+}
+
+
+def _score_bar(label, value, max_val=100):
+    """Render a horizontal score bar."""
+    if value is None:
+        return html.Div([
+            html.Span(label, style={"fontSize": "0.85rem", "color": "#666", "width": "100px", "display": "inline-block"}),
+            html.Span("N/A", style={"fontSize": "0.85rem", "color": "#999"}),
+        ], style={"marginBottom": "0.5rem"})
+    pct = min(float(value) / max_val * 100, 100)
+    color = "#2ecc71" if pct >= 70 else "#f39c12" if pct >= 40 else "#e94560"
+    return html.Div([
+        html.Span(label, style={"fontSize": "0.85rem", "color": "#666", "width": "100px", "display": "inline-block"}),
+        html.Div(
+            html.Div(style={"width": f"{pct}%", "height": "100%", "backgroundColor": color, "borderRadius": "4px"}),
+            style={"flex": "1", "height": "12px", "backgroundColor": "#eee", "borderRadius": "4px", "display": "inline-block", "width": "60%", "verticalAlign": "middle"},
+        ),
+        html.Span(f" {int(value)}", style={"fontSize": "0.85rem", "fontWeight": "bold", "marginLeft": "0.5rem"}),
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "0.5rem"})
+
+
+def _build_neighborhood_report(neighborhood):
+    """Build the neighborhood intelligence panel from API response data."""
+    grade = neighborhood.get("grade", "C")
+    grade_score = float(neighborhood.get("grade_score", 0))
+    grade_color = GRADE_COLORS.get(grade, "#999")
+
+    # Grade badge
+    badge = html.Div([
+        html.Div(grade, style={
+            "fontSize": "2.5rem", "fontWeight": "bold", "color": "white",
+            "backgroundColor": grade_color, "width": "70px", "height": "70px",
+            "borderRadius": "12px", "display": "flex", "alignItems": "center",
+            "justifyContent": "center",
+        }),
+        html.Div([
+            html.Div("Neighborhood Grade", style={"fontSize": "0.85rem", "color": "#666"}),
+            html.Div(f"Score: {grade_score:.0f}/100", style={"fontSize": "1rem", "fontWeight": "bold"}),
+        ], style={"marginLeft": "1rem"}),
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "1.5rem"})
+
+    sections = [badge]
+
+    # Demographics
+    demo = neighborhood.get("demographics")
+    if demo:
+        demo_items = []
+        if demo.get("median_household_income") is not None:
+            demo_items.append(html.P(f"Median Household Income: ${demo['median_household_income']:,}"))
+        if demo.get("median_home_value") is not None:
+            demo_items.append(html.P(f"Median Home Value: ${demo['median_home_value']:,}"))
+        if demo.get("poverty_rate") is not None:
+            demo_items.append(html.P(f"Poverty Rate: {float(demo['poverty_rate']) * 100:.1f}%"))
+        if demo.get("renter_pct") is not None:
+            demo_items.append(html.P(f"Renter Percentage: {float(demo['renter_pct']) * 100:.1f}%"))
+        if demo.get("population") is not None:
+            demo_items.append(html.P(f"Tract Population: {demo['population']:,}"))
+        if demo_items:
+            sections.append(html.Div([
+                html.H4("Demographics", style={"marginBottom": "0.5rem"}),
+                html.Div(demo_items),
+            ], style={"marginBottom": "1rem"}))
+
+    # Walk / Transit / Bike scores
+    ws = neighborhood.get("walk_score")
+    if ws:
+        sections.append(html.Div([
+            html.H4("Walkability", style={"marginBottom": "0.5rem"}),
+            _score_bar("Walk", ws.get("walk_score")),
+            _score_bar("Transit", ws.get("transit_score")),
+            _score_bar("Bike", ws.get("bike_score")),
+        ], style={"marginBottom": "1rem"}))
+
+    # Schools
+    schools = neighborhood.get("schools", [])
+    if schools:
+        avg = neighborhood.get("avg_school_rating")
+        avg_text = f" (avg {float(avg):.1f}/10)" if avg else ""
+        school_rows = [
+            html.Tr([
+                html.Td(s["name"]),
+                html.Td(s["level"].title()),
+                html.Td(f"{s['rating']}/10", style={"fontWeight": "bold"}),
+                html.Td(f"{float(s['distance_miles']):.1f} mi"),
+            ])
+            for s in schools[:8]
+        ]
+        sections.append(html.Div([
+            html.H4(f"Nearby Schools{avg_text}", style={"marginBottom": "0.5rem"}),
+            html.Table([
+                html.Thead(html.Tr([html.Th("School"), html.Th("Level"), html.Th("Rating"), html.Th("Distance")])),
+                html.Tbody(school_rows),
+            ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.9rem"}),
+        ], style={"marginBottom": "1rem"}))
+
+    # AI narrative
+    narrative = neighborhood.get("ai_narrative")
+    if narrative:
+        sections.append(html.Div([
+            html.H4("Investment Assessment", style={"marginBottom": "0.5rem"}),
+            html.P(narrative, style={"lineHeight": "1.6", "color": "#333"}),
+        ], style={"marginBottom": "1rem"}))
+
+    return html.Div(
+        [html.H3("Neighborhood Intelligence", style={"marginBottom": "1rem"})] + sections,
+        style={
+            "backgroundColor": "#f8f9fa", "padding": "1.5rem",
+            "borderRadius": "12px", "marginTop": "2rem",
+            "border": "1px solid #dee2e6",
+        },
+    )

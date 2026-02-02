@@ -304,6 +304,21 @@ async def analyze(
     if req.year_built and prop.year_built == 0:
         prop = replace(prop, year_built=req.year_built)
 
+    # Re-run rent estimation if overrides changed property details and rent is still zero
+    if (rent_estimate is None or rent_estimate.estimated_rent == 0) and prop.bedrooms > 0:
+        try:
+            rent_estimate = await resolver.rent_estimator.estimate_rent(
+                address=prop.address.full,
+                beds=prop.bedrooms,
+                baths=float(prop.bathrooms),
+                sqft=prop.sqft,
+                property_type=prop.property_type,
+            )
+            if rent_estimate and rent_estimate.estimated_rent > 0:
+                prop = replace(prop, estimated_rent=Decimal(str(rent_estimate.estimated_rent)))
+        except Exception:
+            pass  # will fall through to smart assumptions default
+
     # Build investor profile
     investor = _build_investor(req)
 

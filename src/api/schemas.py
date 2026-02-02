@@ -23,6 +23,12 @@ class AnalyzeRequest(BaseModel):
     # Purchase price override (address lookup mode)
     purchase_price_override: Decimal | None = None
 
+    # Property detail overrides (when RentCast is unavailable)
+    sqft: int | None = None
+    bedrooms: int | None = None
+    bathrooms: Decimal | None = None
+    year_built: int | None = None
+
     # Rehab
     condition_grade: str | None = None
     rehab_months: int | None = None

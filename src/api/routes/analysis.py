@@ -1,5 +1,6 @@
 """Analysis routes — the primary API entry point."""
 
+from dataclasses import replace
 from decimal import Decimal
 from uuid import UUID
 
@@ -292,6 +293,16 @@ async def analyze(
         prop, neighborhood_report, macro, rent_estimate = await resolver.resolve_full(req.address)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Apply property detail overrides (useful when RentCast is unavailable)
+    if req.sqft and prop.sqft == 0:
+        prop = replace(prop, sqft=req.sqft)
+    if req.bedrooms is not None and prop.bedrooms == 0:
+        prop = replace(prop, bedrooms=req.bedrooms)
+    if req.bathrooms is not None and prop.bathrooms == Decimal("0"):
+        prop = replace(prop, bathrooms=req.bathrooms)
+    if req.year_built and prop.year_built == 0:
+        prop = replace(prop, year_built=req.year_built)
 
     # Build investor profile
     investor = _build_investor(req)

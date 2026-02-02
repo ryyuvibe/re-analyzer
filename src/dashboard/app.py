@@ -20,6 +20,9 @@ app = Dash(
 )
 
 app.layout = html.Div([
+    # Global session store — persists analysis data across page navigation
+    dcc.Store(id="analysis-store", storage_type="session"),
+
     # Navigation
     html.Nav([
         html.Div([

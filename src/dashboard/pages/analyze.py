@@ -8,7 +8,7 @@ Features:
 """
 
 import dash
-from dash import html, dcc, callback, Input, Output, State, no_update
+from dash import html, dcc, callback, Input, Output, State, no_update, ctx
 import plotly.graph_objects as go
 import httpx
 from decimal import Decimal
@@ -246,7 +246,8 @@ def toggle_input_mode(mode):
 
 
 @callback(
-    [Output("results-container", "children"), Output("loading-output", "children")],
+    [Output("results-container", "children"), Output("loading-output", "children"),
+     Output("analysis-store", "data")],
     [Input("analyze-btn", "n_clicks"), Input("manual-analyze-btn", "n_clicks")],
     [
         State("address-input", "value"),
@@ -303,7 +304,7 @@ def run_analysis(
             condition_grade, rehab_months,
             filing_status, agi, fed_rate, state_rate,
         )
-    return no_update, no_update
+    return no_update, no_update, no_update
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +317,7 @@ def _run_address_mode(address, purchase_price_override, condition_grade, rehab_m
                       ovr_rate, ovr_ltv, ovr_rent, ovr_vacancy,
                       ovr_appreciation, ovr_hold, ovr_mgmt, ovr_maint):
     if not address:
-        return no_update, no_update
+        return no_update, no_update, no_update
     try:
         payload = {
             "address": address,
@@ -356,14 +357,14 @@ def _run_address_mode(address, purchase_price_override, condition_grade, rehab_m
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        return html.Div(f"Error: {e}", style={"color": "red"}), ""
+        return html.Div(f"Error: {e}", style={"color": "red"}), "", no_update
 
     children = [_build_scorecard(data), _build_results(data)]
     if data.get("assumption_manifest"):
         children.insert(1, _build_assumption_panel(data["assumption_manifest"]))
     if data.get("neighborhood"):
         children.append(_build_neighborhood_report(data["neighborhood"]))
-    return html.Div(children), ""
+    return html.Div(children), "", data
 
 
 def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
@@ -374,7 +375,7 @@ def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
         return html.Div(
             "Purchase price and monthly rent are required.",
             style={"color": "red", "padding": "1rem"},
-        ), ""
+        ), "", no_update
 
     try:
         sqft = int(sqft) if sqft else 1200
@@ -420,9 +421,9 @@ def _run_manual_mode(price, rent, sqft, year_built, prop_tax, insurance,
             result, manual_address, beds, baths, sqft, year_built, price, rent, prop_tax,
         )
     except Exception as e:
-        return html.Div(f"Error: {e}", style={"color": "red", "padding": "1rem"}), ""
+        return html.Div(f"Error: {e}", style={"color": "red", "padding": "1rem"}), "", no_update
 
-    return html.Div([_build_scorecard(data), _build_results(data)]), ""
+    return html.Div([_build_scorecard(data), _build_results(data)]), "", data
 
 
 # ---------------------------------------------------------------------------
@@ -1040,3 +1041,26 @@ def _build_neighborhood_report(neighborhood):
             "border": "1px solid #dee2e6",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Restore results from session store on page load
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("results-container", "children", allow_duplicate=True),
+    Input("analysis-store", "data"),
+    prevent_initial_call="initial_duplicate",
+)
+def restore_from_store(data):
+    """Re-render results when navigating back to the Analyze page."""
+    if not data:
+        return no_update
+
+    children = [_build_scorecard(data), _build_results(data)]
+    if data.get("assumption_manifest"):
+        children.insert(1, _build_assumption_panel(data["assumption_manifest"]))
+    if data.get("neighborhood"):
+        children.append(_build_neighborhood_report(data["neighborhood"]))
+    return html.Div(children)
